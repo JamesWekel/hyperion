@@ -458,6 +458,7 @@ static void* logger_thread( void* arg )
         release_lock( &logger_lock );
 
         /* begin shutdown requested
+           - notify panel to shutdown
            - handle all logger pre-shutdown actions
            - set system shutdown flag
         */
@@ -465,14 +466,16 @@ static void* logger_thread( void* arg )
         {
             obtain_lock( &logger_lock );
             {
-                if ( !sysblk.shutdown )
+                if ( !sysblk.shutdown  )
                 {
+                    // synchronize with panel to shutdown
+                    panel_shutdown( NULL );
 
-#if !defined( _MSVC_ )
+ #if !defined( _MSVC_ )
                     logger_unredirect();
 #endif
 
-                    sysblk.shutdown = TRUE;       // (system shutdown initiated)
+                    sysblk.shutdown = TRUE;     // (system shutdown initiated)
                 }
             }
             release_lock( &logger_lock );

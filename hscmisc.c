@@ -1465,13 +1465,13 @@ static void cancel_wait_for_guest_quiesce()
 /*  Shutdown initialation steps:                                     */
 /*     1. set shutbegin=TRUE to notify logger to synchronize it's    */
 /*        shutdown steps and set system shutdown request             */
-/*     2. short spin-wait for logger to set system shutdown request  */
+/*     2. spin-wait for logger to set system shutdown request        */
 /*     3  ensure system shutdown requested                           */
 /*-------------------------------------------------------------------*/
 
 static void do_shutdown_now()
 {
-    int     spincount = 16;           // spin-wait count for logger-thread
+    int     spincount = 0;            // spin-wait count
     bool    loggersetshutdown = TRUE; // assume logger sets system shutdown
 
     ASSERT( !sysblk.shutfini );   // (sanity check)
@@ -1483,19 +1483,31 @@ static void do_shutdown_now()
     // "Begin Hercules shutdown"
     WRMSG( HHC01420, "I" );
 
-    // (hack to prevent minor message glitch during shutdown)
-    fflush( stdout );
-    fflush( stderr );
+    // wait for logger to initial shutdown. As logger synchronizes shutdown
+    // with panel, spin-wait for panel to be shutdown based on panrate.
+    // Note: two spin-waits follow. In daemon_mode, the first spin-wait
+    //       is null as there is no initialized panel. Otherwise, the
+    //       first spin-wait waits for the panel to be cleaned up and
+    //       shutdown should be set so the second spin-wait is null.
+    //       Effectively, only one of the spin-wait will execute.
+    //
+    spincount = 32;
+    while ( sysblk.panel_init && spincount-- )
+    {
+        log_wakeup( NULL );
+        USLEEP ( ( sysblk.panrate * 1000) / 8 );
+        //LOGMSG("hsmisc.c: shutdown spin-wait on panel: count: %d, panel_init: %d\n", spincoun, (int) sysblk.panel_init);
+    };
 
-    // spin-wait for logger to initiate system shutdown
+    spincount = 16;
     while ( !sysblk.shutdown && spincount-- )
     {
         log_wakeup( NULL );
-        USLEEP( 5000 );
-        //LOGMSG("hsmisc.c: shutdown spin-wait on logger: count: %d, shutdown: %d\n", spincount, (int) sysblk.shutdown);
-    }
+        USLEEP ( 5000 );
+        //LOGMSG("hsmisc.c: shutdown spin-wait on sysblk.shutdow: count: %d, sysblk.shutdow: %d\n", spincount, (int) sysblk.shutdown);
+    };
 
-    // safety measure: ensure system shutdown requested
+    // safety measure: ensure system shutdown was requested
     if ( !sysblk.shutdown )
     {
         sysblk.shutdown = TRUE;       // (system shutdown initiated)
@@ -1515,17 +1527,14 @@ static void do_shutdown_now()
     // "Calling termination routines"
     WRMSG( HHC01423, "I" );
 
-    // (hack to prevent minor message glitch during shutdown)
-    fflush( stdout );
-    fflush( stderr );
-    USLEEP( 10000 );
-
-    // if logger didn't set shutdown, handle unredirect
+    // if logger didn't set shutdown,
+    //    handle unredirect and panel shutdown
     if ( !loggersetshutdown )
     {
+        panel_shutdown( NULL);
 
 #if !defined( _MSVC_ )
-                logger_unredirect();
+        logger_unredirect();
 #endif
 
     }

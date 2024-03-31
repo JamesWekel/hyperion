@@ -52,6 +52,11 @@ LOGR_DLL_IMPORT int    logger_isactive ();
 #define DATESTAMPLOG   (!sysblk.logoptnodate)
 #define STAMPLOG       (TIMESTAMPLOG || DATESTAMPLOG)
 
+/*********************************************************************/
+/*  panel references                                                 */
+/*********************************************************************/
+HPAN_DLL_IMPORT void panel_shutdown(void *unused);
+
 LOGR_DLL_IMPORT void   logger_timestamped_logfile_write( const void* pBuff, size_t nBytes );
 
 #if !defined( _MSVC_ )

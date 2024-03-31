@@ -200,6 +200,8 @@ static int   cmdcols = 0;               /* visible cmdline width cols*/
 static int   cmdcol  = 0;               /* cols cmdline scrolled righ*/
 static FILE *confp   = NULL;            /* Console file pointer      */
 
+static bool  panel_begin_shutdown = FALSE; /* begin panel shutdown   */
+static LOCK  cleanup_lock;                 /* lock cleanup execution */
 ///////////////////////////////////////////////////////////////////////
 
 #define CMD_PREFIX_HERC     "herc =====> "
@@ -1503,7 +1505,8 @@ static void NP_update(REGS *regs)
 
 /* ==============   End of the main NP block of code    =============*/
 
-static void panel_cleanup(void *unused);    // (forward reference)
+static     void panel_cleanup(void *unused);    // (forward reference)
+DLL_EXPORT void panel_shutdown(void *unused);   // (forward reference)
 
 ///////////////////////////////////////////////////////////////////////
 // "maxrates" command support...
@@ -1781,7 +1784,11 @@ char    buf[1024];                      /* Buffer workarea           */
 size_t  loopcount;                      /* Number of iterations done */
 
     SET_THREAD_NAME( PANEL_THREAD_NAME );
-    hdl_addshut( "panel_cleanup", panel_cleanup, NULL );
+
+    /* panel_cleanup has to be synchronzied with logger.           */
+    /* Logger thread will call panel_shutdown which does cleanup   */
+    //hdl_addshut( "panel_cleanup", panel_cleanup, NULL );
+
     history_init();
 
 #if defined(HAVE_REGEX_H) || defined(HAVE_PCRE)
@@ -1798,6 +1805,9 @@ size_t  loopcount;                      /* Number of iterations done */
     /* Set up the input file descriptors */
     confp = stderr;
     keybfd = STDIN_FILENO;
+
+    /* establish lock for panel_cleanup */
+    initialize_lock( &cleanup_lock );
 
     /* Initialize screen dimensions */
     cons_term = get_symbol( "TERM" ); // Note! result could be "" empty string!
@@ -2967,9 +2977,17 @@ FinishShutdown:
         /* Don't read or otherwise process any input
            once system shutdown has been initiated
         */
-        if ( sysblk.shutdown )
+        if ( sysblk.shutbegin )
         {
-            if ( sysblk.shutfini ) break;
+            if (panel_begin_shutdown)
+            {
+                /* safety check that logger set shutdown */
+                if ( sysblk.panel_init ) panel_cleanup( NULL );
+
+                /* are we done? */
+                if ( sysblk.shutfini ) break;
+            }
+
             /* wait for system to finish shutting down */
             USLEEP(10000);
             lmsmax = INT_MAX;
@@ -3334,40 +3352,59 @@ FinishShutdown:
 
 } /* end function panel_display */
 
-static void panel_cleanup(void *unused)
+/* write spaces over the whole pane and set position to top left */
+static void blank_panel()
 {
-int i;
-PANMSG* p;
+    char blanks[MSG_SIZE];
+    int i = 0;
 
+    memset(blanks, ' ' , MSG_SIZE);
+    for (i=1; i <= cons_rows; i++)
+    {
+        set_pos(i,1);
+        write_text(blanks, MSG_SIZE);
+    }
+    set_pos(1,1);
+}
+
+DLL_EXPORT void panel_shutdown(void *unused)
+{
     UNREFERENCED(unused);
 
-    log_wakeup(NULL);
+    panel_begin_shutdown = TRUE;
+    panel_cleanup( NULL );
+}
 
-    if(topmsg)
+static void panel_cleanup(void *unused)
+{
+    UNREFERENCED(unused);
+
+    // ignore panel cleanup if we are daemon_mode
+    if (sysblk.daemon_mode) return;
+
+    // avoid the possible chance of two panel_cleanup's running currently
+    // i.e. logger and panel threads
+    obtain_lock( &cleanup_lock);
     {
-        set_screen_color( stderr, COLOR_DEFAULT_FG, COLOR_DEFAULT_BG );
-        clear_screen( stderr );
-
-        /* Scroll to last full screen's worth of messages */
-        scroll_to_bottom_screen();
-
-        /* Display messages in scrolling area */
-        for (i=0, p = topmsg; i < SCROLL_LINES && p != curmsg->next; i++, p = p->next)
+        if (sysblk.panel_init)
         {
-            set_pos (i+1, 1);
-            set_color (COLOR_DEFAULT_FG, COLOR_DEFAULT_BG);
-            write_text (p->msg, MSG_SIZE);
+            /* fill panel with spaces */
+            /* programmers note: erase screen will flush the current panel */
+            /* before providing a blank screen so directly write spaces    */
+            blank_panel();
+
+            /* indicate lines are missing and reference the log */
+            fprintf(confp, ".\n.. see log\n.\n");
+
+            /* Panel is no longer running */
+            sysblk.panel_init = 0;
+
+            /* Restore the terminal mode and default color*/
+            set_or_reset_console_mode( keybfd, 0 );
+            set_screen_color(stderr, COLOR_DEFAULT_FG, COLOR_DEFAULT_BG);
+
+            fflush(confp);
         }
     }
-    sysblk.panel_init = 0;      /* Panel is no longer running */
-
-    /* Restore the terminal mode */
-    set_or_reset_console_mode( keybfd, 0 );
-
-    /* Position to next line */
-    fwrite("\n",1,1,stderr);
-
-    set_screen_color(stderr, COLOR_DEFAULT_FG, COLOR_DEFAULT_BG);
-
-    fflush(stderr);
+    release_lock( &cleanup_lock );
 }
