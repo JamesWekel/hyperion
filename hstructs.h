@@ -736,7 +736,15 @@ struct SYSBLK {
         U8      cpccr;                  /* Dynamic CP change reason  */
         U8      cpcai;                  /* Dynamic CP capacity adj.  */
         U8      hhc_111_112;            /* HHC00111/HHC00112 issued  */
-        U8      have_PCLMULQDQ:1;       /* Host PCLMULQDQ available  */
+                                        /* X86-64 hardware           */
+                                        /* instructions available:   */
+        U8      have_PCLMULQDQ:1;       /*  - PCLMULQDQ              */
+                                        /* hardware instruction      */
+                                        /* support available for:    */
+        U8      have_hw_clmul:1;        /* - Carry-less Multiply     */
+        U8      have_hw_popcount:1;     /* - popcount                */
+        U8      have_hw_clz:1;          /* - count leading zeros     */
+        U8      have_hw_ctz:1;          /* - count trailing zeros    */
 
         COND    cpucond;                /* CPU config/deconfig cond  */
         LOCK    cpulock[ MAX_CPU_ENGS ];/* CPU lock               */

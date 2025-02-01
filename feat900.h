@@ -235,6 +235,61 @@
 #define FEATURE_TRACING
 #define FEATURE_VIRTUAL_ARCHITECTURE_LEVEL
 #define FEATURE_VM_BLOCKIO
+
+/* ARM AArch64 processor? */
+#if defined( __aarch64__ ) &&  defined( __ARM_NEON )
+    #include <arm_neon.h>
+    #define FEATURE_V128_NEON 1
+
+    /* Gcc 10+ / Clang 11+ */
+    #if ( (defined( __clang_major__ ) && __clang_major__ >= 11  ) ||   \
+          (defined( __GNUC__ ) && __GNUC__ >= 10  )                    \
+        )
+
+        /* use GCC/Clang builtins */
+        #define FEATURE_V128__BUILTIN 1
+
+        /* For Gcc/Clang, check for compiler recognized HW features */
+        /* to avoid compile errors                                  */
+
+        /* Carry-less multiply */
+        #if defined(__ARM_FEATURE_AES)
+            // #pragma message("FEATURE_HW_CLMUL is defined." )
+            #define FEATURE_HW_CLMUL  1
+            /*  for clang, require aes target for ARM_NEON.H
+                'vmull_p64' function call. Also works for GCC.
+            */
+            #define ATTRIBUTE_AES __attribute__((target("+aes")))
+        #else
+            #define ATTRIBUTE_AES
+        #endif
+    #endif /* Gcc 10+ / Clang 11+ */
+
+    /* compile debug message: are we using intrinsics? */
+    #if 0
+        #if defined( FEATURE_V128_NEON )
+        #pragma message("FEATURE_V128_NEON is defined.  Using intrinsics." )
+        #else
+        #pragma message("No Arm_neon intrinsics are included for optimization; only compiler optimization")
+        #endif
+        #if defined( FEATURE_HW_CLMUL )
+        #pragma message("FEATURE_HW_CLMUL is defined.  Using intrinsics." )
+        #else
+        #pragma message("No FEATURE_HW_CLMUL; only compiler optimization")
+        #endif
+        #if defined(__ARM_FEATURE_AES)
+        #pragma message("__ARM_FEATURE_AES is defined.  Using intrinsics." )
+        #else
+        #pragma message("No __ARM_FEATURE_AES; only compiler optimization")
+        #endif
+    #endif
+
+#else
+    /*  set to null for all other builds  */
+    #define ATTRIBUTE_AES
+
+#endif /* defined( __aarch64__ ) &&  defined( __ARM_NEON ) */
+
 /* INTEL X64 processor? */
 #if defined( __x86_64__ ) || defined( _M_X64 )
   /* MSVC on X64: intrinsics are available and should be used for optimization */
@@ -273,7 +328,8 @@
       #pragma message("No intrinsics are included for optimization; only compiler optimization")
     #endif
   #endif
-#endif
+#endif/* defined( __x86_64__ ) || defined( _M_X64 ) */
+
 #define FEATURE_WAITSTATE_ASSIST
 #define FEATURE_ZVM_ESSA
 

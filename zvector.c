@@ -176,7 +176,10 @@ typedef union {
         S8   s_8[16];
 
 #if defined( FEATURE_V128_SSE )
-        __m128i V;      // intrinsic type vector
+        __m128i   v;      // X64 intrinsic type vector
+#endif
+#if defined( FEATURE_V128_NEON )
+        poly128_t v;      // AArch64 intrinsic type vector
 #endif
 
 }  U128  ;
@@ -390,7 +393,7 @@ static inline void u128_logmsg(const char * msg, U128 u)
 /*                                                                   */
 /* version depends on whether intrinsics are being used              */
 /*-------------------------------------------------------------------*/
-static inline U64 gf_mul_32( U32 m1, U32 m2)
+static inline ATTRIBUTE_AES U64 gf_mul_32( U32 m1, U32 m2)
 {
 #if defined( FEATURE_V128_SSE ) && defined( FEATURE_HW_CLMUL )
 
@@ -409,15 +412,32 @@ static inline U64 gf_mul_32( U32 m1, U32 m2)
         mm2.D.L.D = m2;
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_32 mm2.v", mm2.D.H.D, mm2.D.L.D);
 
-        acc.v =  _mm_clmulepi64_si128 ( mm1.v, mm2.v, 0);
+        acc.v =  _mm_clmulepi64_si128 ( mm1.v, mm2.v, 0 );
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_32 acc.v", acc.D.H.D, acc.D.L.D);
 
         return acc.D.L.D;
     }
     else
 
+#elif defined( FEATURE_V128_NEON ) && defined( FEATURE_HW_CLMUL )
+    if (sysblk.have_hw_clmul)
+    {
+        /* intrinsic GF 64-bit multiply */
+        U128 acc;                      /* U128 accumulator              */
+
+            //logmsg("%s: u128=%16.16"PRIX64" \n", "gf_mul_32 m1", m1);
+            //logmsg("%s: u128=%16.16"PRIX64" \n", "gf_mul_324 m2", m2);
+
+        acc.v =  vmull_p64 ( m1, m2 );
+
+            //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_32 acc.v", acc.Q.D.H.D, acc.Q.D.L.D);
+
+        return acc.Q.D.L.D;
+    }
+    else
+
 #endif  //  !(defined( FEATURE_V128_SSE ) && defined( FEATURE_HW_CLMUL )), or
-        // "PCLMULQDQ" instruction unavailable
+        //  carry-less multiply (PCLMULQDQ or Pmull) instruction unavailable
     {
         int     i;                    /* loop index                      */
         U32     myerU32;              /* multiplier                      */
@@ -463,7 +483,7 @@ static inline U64 gf_mul_32( U32 m1, U32 m2)
 /*                                                                   */
 /* version depends on whether intrinsics are being used              */
 /*-------------------------------------------------------------------*/
-static inline void gf_mul_64( U64 m1, U64 m2, U64* accu128h, U64* accu128l)
+static inline ATTRIBUTE_AES void gf_mul_64( U64 m1, U64 m2, U64* accu128h, U64* accu128l)
 {
 #if defined( FEATURE_V128_SSE ) && defined( FEATURE_HW_CLMUL )
 
@@ -482,7 +502,7 @@ static inline void gf_mul_64( U64 m1, U64 m2, U64* accu128h, U64* accu128l)
         mm2.D.L.D = m2;
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_64 mm2.v", mm2.D.H.D, mm2.D.L.D);
 
-        acc.v =  _mm_clmulepi64_si128 ( mm1.v, mm2.v, 0);
+        acc.v =  _mm_clmulepi64_si128 ( mm1.v, mm2.v, 0 );
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_64 acc.v", acc.D.H.D, acc.D.L.D);
 
         *accu128h = acc.D.H.D;
@@ -490,8 +510,26 @@ static inline void gf_mul_64( U64 m1, U64 m2, U64* accu128h, U64* accu128l)
     }
     else
 
+#elif defined( FEATURE_V128_NEON ) && defined( FEATURE_HW_CLMUL )
+    if (sysblk.have_hw_clmul)
+    {
+        /* intrinsic GF 64-bit multiply */
+        U128 acc;                      /* U128 accumulator              */
+
+            //logmsg("%s: u128=%16.16"PRIX64" \n", "gf_mul_64 m1", m1);
+            //logmsg("%s: u128=%16.16"PRIX64" \n", "gf_mul_64 m2", m2);
+
+        acc.v =  vmull_p64 ( m1, m2 );
+
+            //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_64 acc.v", acc.Q.D.H.D, acc.Q.D.L.D);
+
+        *accu128h = acc.Q.D.H.D;
+        *accu128l = acc.Q.D.L.D;
+    }
+    else
+
 #endif  //  !(defined( FEATURE_V128_SSE ) && defined( FEATURE_HW_CLMUL )), or
-        // "PCLMULQDQ" instruction unavailable
+        //  carry-less multiply (PCLMULQDQ or Pmull) instruction unavailable
     {
         /* portable C: GF 64-bit multiply */
         int     i;                    /* loop index                      */

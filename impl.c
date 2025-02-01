@@ -901,25 +901,166 @@ static void is_PCLMULQDQ_available()
 #else // !defined( _GCC_SSE2_ ) || !defined( HAVE_SIGNAL_HANDLING ) || !defined( FEATURE_HW_CLMUL )
 
 /* No way to know without SSE2 and signal handling, so play it safe! */
+#if defined ( __x86_64__ )
 static void is_PCLMULQDQ_available()
 {
     sysblk.have_PCLMULQDQ = false;  /* (safest default) */
 }
+#endif /* __x86_64__ */
 
 #endif // defined( _GCC_SSE2_ ) && defined( HAVE_SIGNAL_HANDLING )
 #endif /* Windows or Linux */
 
-/* Check if various host instructions are available or not */
-static void check_host_instruction_availability()
+/* reset all instruction available flags */
+static void reset_have_instructions()
 {
-    /* Check availability of each individual host instruction first */
-    is_PCLMULQDQ_available();
-//  is_XXXXXXXXX_available();
+    sysblk.have_PCLMULQDQ      = false;
+    sysblk.have_hw_clmul       = false;
+    sysblk.have_hw_popcount    = false;
+    sysblk.have_hw_clz         = false;
+    sysblk.have_hw_ctz         = false;
+}
 
-    /* Then report all of the ones that aren't available */
-    // "WARNING: Host does not support the '%s' instruction"
-    if (!sysblk.have_PCLMULQDQ) WRMSG( HHC00026, "W", "PCLMULQDQ" );
-//  if (!sysblk.have_XXXXXXXXX) WRMSG( HHC00026, "W", "XXXXXXXXX" );
+/* ----------------------------------------------- */
+/* check_aarch64_instruction_availability()        */
+/* ----------------------------------------------- */
+#if defined( __aarch64__ )
+
+// Get AArch64 Instruction Set Attribute Register 0
+// https://developer.arm.com/documentation/ddi0601/2024-12/AArch64-Registers/ID-AA64ISAR0-EL1--AArch64-Instruction-Set-Attribute-Register-0
+static inline uint64_t Get_ID_AA64ISAR0_EL1(void) {
+    uint64_t ID_AA64ISAR0_EL1;
+    __asm("mrs %0, ID_AA64ISAR0_EL1" : "=r"(ID_AA64ISAR0_EL1));
+    return ID_AA64ISAR0_EL1;
+}
+
+// Get AArch64 Processor Feature Register 0
+// https://developer.arm.com/documentation/ddi0601/2024-12/AArch64-Registers/ID-AA64PFR0-EL1--AArch64-Processor-Feature-Register-0
+static inline uint64_t Get_ID_AA64PFR0_EL1(void) {
+    uint64_t ID_AA64PFR0_EL1;
+    __asm("mrs %0, ID_AA64ISAR0_EL1" : "=r"(ID_AA64PFR0_EL1));
+    return ID_AA64PFR0_EL1;
+}
+
+// Is carry-less multiply instruction available
+static bool is_clmul_available()
+{
+    U64 hw_flags;
+    hw_flags = Get_ID_AA64ISAR0_EL1();
+
+    // carry-less multiply
+   return (( hw_flags >> 4 ) & 0b0010) != 0;    // FEAT_PMULL implements the functionality identified by the value 0b0010.
+}
+
+// Are AArch64  Advanced SIMD instructions available
+static bool is_asimd_available()
+{
+    U64 hw_flags;
+    hw_flags = Get_ID_AA64PFR0_EL1();
+
+    // AdvSIMD, bits [23:20]:
+    return (( hw_flags >> 20 ) & 0b1111) != 0b1111;    // FEAT_ASIMD: 0b1111  Advanced SIMD is not implemented.
+}
+
+static void check_aarch64_instruction_availability()
+{
+    bool have_asimd;
+
+    /* AArch64 should always have asimd (Advanced AIMD or NEON) instructions */
+    /* but check AArch64 Processor Feature Register 0 to be sure             */
+    have_asimd = is_asimd_available();
+    sysblk.have_hw_popcount    = have_asimd;
+    sysblk.have_hw_clz         = have_asimd;
+    sysblk.have_hw_ctz         = have_asimd;
+
+    /* check whether carry-less multply (PMULL) is available */
+    sysblk.have_hw_clmul = is_clmul_available();
+}
+
+#endif /* defined( __aarch64__ ) */
+
+/* ----------------------------------------------- */
+/* check_x64_instruction_availability()            */
+/* ----------------------------------------------- */
+#if defined( _MSVC_ ) && defined( _M_X64 )
+
+/* MSVC version */
+static void check_x64_instruction_availability()
+{
+    int cpuInfo[4] = {0};
+    int nIds;
+
+    /* use msvc __cpuid intinsic to get cpu info - Features */
+
+    __cpuid(cpuInfo, 0);
+    nIds = cpuInfo[0];            // number of __cpuid function ID's
+
+    __cpuid(cpuInfo, 1);
+    sysblk.have_hw_clmul       = 0 != (cpuInfo[2] & (1 <<  1));   // PCLMULQDQ
+    sysblk.have_hw_popcount    = 0 != (cpuInfo[2] & (1 << 23));   // POPCNT
+
+    if ( nIds >= 7 )
+    {
+        __cpuid(cpuInfo, 7);
+        sysblk.have_hw_clz      = 0 != (cpuInfo[1] & (1 <<  5));  // LZCNT
+        sysblk.have_hw_ctz      = 0 != (cpuInfo[1] & (1 << 3));   // BMI1
+    }
+
+    is_PCLMULQDQ_available();
+}
+
+#elif defined( __x86_64__ ) && defined( __GNUC__ )
+
+/* Gcc/Clang version */
+static void check_x64_instruction_availability()
+{
+    /* __builtin hardware feature check  */
+    __builtin_cpu_init ();
+    sysblk.have_hw_clmul       = 0 != __builtin_cpu_supports("pclmul") ;
+    sysblk.have_hw_popcount    = 0 != __builtin_cpu_supports("popcnt");
+    sysblk.have_hw_clz         = 0 != __builtin_cpu_supports("lzcnt");
+    sysblk.have_hw_ctz         = 0 != __builtin_cpu_supports("bmi");
+
+    is_PCLMULQDQ_available();
+}
+
+#endif /* check_x64_instruction_availability() */
+
+ /* Check if various host instructions are available or not */
+ static void check_host_instruction_availability()
+ {
+    char buff[256] = {0};               /* list of instructions */
+    reset_have_instructions();
+
+// X64 instruction checks
+#if defined( __x86_64__ ) || defined( _M_X64 )
+     /* Check availability of each individual host instruction first */
+     check_x64_instruction_availability();
+
+     /* Then report all of the ones that aren't available */
+    if (!sysblk.have_PCLMULQDQ)    strcat(buff, " PCLMULQDQ" );
+    if (!sysblk.have_hw_clmul)     strcat(buff, " PCLMULQDQ (clmul check)" );
+    if (!sysblk.have_hw_popcount)  strcat(buff, " POPCNT" );
+    if (!sysblk.have_hw_clz)       strcat(buff, " LZCNT" );
+    if (!sysblk.have_hw_ctz)       strcat(buff, " TZCNT" );
+
+ #endif /* X64 instruction checks */
+
+ // ARM AArch64 Neon instruction checks
+ #if defined( __aarch64__ ) &&  defined( __ARM_NEON )
+     /* Check availability of each individual host instruction first */
+     check_aarch64_instruction_availability();
+
+     /* Then report all of the ones that aren't available */
+    if (!sysblk.have_hw_clmul)     strcat(buff, " PMULL" );
+    if (!sysblk.have_hw_popcount)  strcat(buff, " POPCNT" );
+    if (!sysblk.have_hw_clz)       strcat(buff, " CLZ" );
+    if (!sysblk.have_hw_ctz)       strcat(buff, " CTZ" );
+ #endif /* ARM AArch64 Neon instruction checks */
+
+    /* any missing instructions? */
+    // "WARNING: Host does not support instructions: %s"
+    if (strlen( buff ) > 0 ) WRMSG( HHC00026, "W", buff );
 }
 
 /*-------------------------------------------------------------------*/
