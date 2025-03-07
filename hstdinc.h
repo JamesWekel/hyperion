@@ -110,7 +110,7 @@
 #endif
 
 #if defined( __GNUC__) && defined(__aarch64__) && defined(__ARM_NEON)
-    #defined SSE2NEON_SUPPRESS_WARNINGS
+    #define SSE2NEON_SUPPRESS_WARNINGS
     #include "sse2neon.h"
     #define FEATURE_V128_SSE 1
 #endif
