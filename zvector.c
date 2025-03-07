@@ -136,6 +136,14 @@
 /*------------------------------------------------------------------------*/
 
 /*===================================================================*/
+/*Arch64 system: include sse2neon.h and set Feature_V128_SSE         */
+/*===================================================================*/
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    #include "sse2neon.h"
+    #define FEATURE_V128_SSE 1
+#endif
+
+/*===================================================================*/
 /* Achitecture Independent Routines                                  */
 /*===================================================================*/
 
@@ -373,6 +381,1333 @@ static inline void u128_logmsg(const char * msg, U128 u)
     printf("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", msg, u.Q.D.H.D, u.Q.D.L.D);
 }
 
+/* QW access helpers */
+#if defined(WORDS_BIGENDIAN)
+  #define QW_D(_i)  d[(_i)]                  /* Doubleword           */
+  #define QW_F(_i)  f[(_i)]                  /* Fullword             */
+  #define QW_H(_i)  h[(_i)]                  /* Halfword             */
+  #define QW_B(_i)  b[(_i)]                  /* Byte                 */
+#else
+  #define QW_D(_i)  d[1-(_i)]                /* Doubleword           */
+  #define QW_F(_i)  f[3-(_i)]                /* Fullword             */
+  #define QW_H(_i)  h[7-(_i)]                /* Halfword             */
+  #define QW_B(_i)  b[15-(_i)]               /* Byte                 */
+#endif
+
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* intrinsic optimization helper routines                            */
+/* ================================================================= */
+
+/* ignore "unused-function" warnings */
+#if defined(__GNUC__) && !defined(__clang__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wunused-function"
+#elif defined(__GNUC__) && defined(__clang__)
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wunused-function"
+#endif
+
+/**
+ * v128_zero
+ *      return a 128-bit 'zero' vector
+ */
+static inline __m128i v128_zero()
+{
+    return _mm_setzero_si128 ();
+}
+
+/**
+ * v128_one
+ *      return a 128-bit 'one' vector
+ */
+static inline __m128i v128_one()
+{
+    return _mm_set_epi64x( 0, 1 );
+}
+
+/**
+ * v128_set
+ *      return a 128-bit vector with U64 value
+ */
+static inline __m128i v128_set(const U64 value)
+{
+    return _mm_set_epi64x( 0, value );
+}
+
+/**
+ * v128_find_first_equal_xx
+ *      find the index of the first byte (_8), halfword (_16) or word (_32)
+ *      where the source vector element is equal to the compare_to vector
+ *      element.
+ *
+ *      If an equal element is not found, the return value is:
+ *          16 for byte (_8),
+ *           8 for halfword (_16)
+ *           4 for word (_32)
+ */
+
+static int v128_find_first_equal_8( const __m128i source , const __m128i compare_to )
+{
+    int index = _mm_cmpestri ( compare_to, 16, source, 16, _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_EACH | _SIDD_MOST_SIGNIFICANT );
+    if ( index == 16 )
+        return 16;              /* not found */
+    else
+        return 15 - index;      /* convert to big-endian */
+}
+
+static int v128_find_first_equal_16( const __m128i source , const __m128i compare_to )
+{
+    int index = _mm_cmpestri ( compare_to, 16, source, 16, _SIDD_UWORD_OPS | _SIDD_CMP_EQUAL_EACH | _SIDD_MOST_SIGNIFICANT );
+    if (index == 8)
+        return 8;              /* not found */
+    else
+        return 7 - index;      /* convert to big-endian */
+}
+
+static int v128_find_first_equal_32( const __m128i vec_a , const __m128i vec_b )
+{
+    int i;
+    QW  v_a, v_b;
+
+    //required for MSVC: 'type cast': cannot convert from 'const __m128i' to 'QW'
+    v_a.v = vec_a;
+    v_b.v = vec_b;
+
+    for (i=0; i < 4; i++)
+    {
+        if ( v_a.QW_F(i)  == v_b.QW_F(i) )
+            return i;
+    }
+    return 4;
+}
+
+/**
+ * v128_find_first_not_equal_xx
+ *      find the index of the first byte (_8), halfword (_16) or word (_32)
+ *      where the source vector element is not equal to the compare_to vector
+ *      element.
+ *
+ *      If a not-equal element is not found, the return value is:
+ *          16 for byte (_8),
+ *           8 for halfword (_16)
+ *           4 for word (_32)
+ */
+
+static int v128_find_first_not_equal_8( const __m128i vec_a , const __m128i vec_b )
+{
+    // Compare bytes for equality
+    __m128i mask = _mm_cmpeq_epi8( vec_a, vec_b );
+
+    int index = _mm_cmpestri ( _mm_set1_epi8( 0x00 ), 16, mask, 16,
+                        _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_EACH | _SIDD_MOST_SIGNIFICANT );
+    if (index == 16)
+        return 16;              /* not found */
+    else
+        return 15 - index;      /* convert to big-endian */
+
+}
+
+static int v128_find_first_not_equal_16( const __m128i vec_a , const __m128i vec_b )
+{
+    // Compare bytes for equality
+    __m128i mask = _mm_cmpeq_epi16( vec_a, vec_b );
+
+    int index = _mm_cmpestri ( _mm_set1_epi16( 0x0000 ), 16, mask, 16,
+                        _SIDD_UWORD_OPS | _SIDD_CMP_EQUAL_EACH | _SIDD_MOST_SIGNIFICANT );
+    if ( index == 8 )
+        return index;           /* not found */
+    else
+        return 7 - index;       /* convert to big-endian */
+}
+
+static int v128_find_first_not_equal_32( const __m128i vec_a , const __m128i vec_b )
+{
+    int i;
+    QW  v_a, v_b;
+
+    //required for MSVC: 'type cast': cannot convert from 'const __m128i' to 'QW'
+    v_a.v = vec_a;
+    v_b.v = vec_b;
+
+    for (i=0; i < 4; i++)
+    {
+        if ( v_a.QW_F(i)  != v_b.QW_F(i) )
+            return i;
+    }
+    return 4;
+}
+
+/**
+ * v128_find_first_equal_xx
+ *      find the index of the first byte (_8), halfword (_16) or word (_32)
+ *      in the vector that is equal to the parameter.
+ *
+ *      If the parameter is not found, the return value is:
+ *          16 for byte (_8),
+ *           8 for halfword (_16)
+ *           4 for word (_32)
+ */
+
+static int v128_find_first_in_vector_8( const __m128i source, const U8 byte )
+{
+    // Create a vector with 16 instances of the byte to find
+    __m128i compare_to = _mm_set1_epi8( byte );
+
+    int index = _mm_cmpestri ( compare_to, 16, source, 16, _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_EACH | _SIDD_MOST_SIGNIFICANT );
+    if ( index == 16 )
+        return 16;              /* not found */
+    else
+        return 15 - index;      /* convert to big-endian */
+}
+
+static int v128_find_first_in_vector_16( const __m128i source, const U16 halfword )
+{
+    // Create a vector with 8 instances of the halfword to find
+    __m128i compare_to = _mm_set1_epi16( halfword );
+
+    int index = _mm_cmpestri ( compare_to, 16, source, 16, _SIDD_UWORD_OPS | _SIDD_CMP_EQUAL_EACH | _SIDD_MOST_SIGNIFICANT) ;
+    if ( index == 8 )
+        return 8;              /* not found */
+    else
+        return 7 - index;      /* convert to big-endian */
+}
+
+static int v128_find_first_in_vector_32( const __m128i vector, const U32 word )
+{
+    int i;
+    QW  v_a;
+
+    //required for MSVC: 'type cast': cannot convert from 'const __m128i' to 'QW'
+    v_a.v = vector;
+
+    for (i=0; i < 4; i++)
+    {
+        if ( v_a.QW_F(i) == word )
+            return i;
+    }
+    return 4;
+}
+
+/**
+ * v128_find_first_zero_in_vector_xx
+ *      find the index of the first zero byte (_8), halfword (_16) or word (_32)
+ *      in the vector.
+ *
+ *      If zero is not found, the return value is:
+ *          16 for byte (_8),
+ *           8 for halfword (_16)
+ *           4 for word (_32)
+ */
+
+static int v128_find_first_zero_in_vector_8( const __m128i vector )
+{
+    return v128_find_first_in_vector_8( vector, 0 );
+}
+
+static int v128_find_first_zero_in_vector_16( const __m128i vector )
+{
+    return v128_find_first_in_vector_16( vector, 0 );
+}
+
+static int v128_find_first_zero_in_vector_32( const __m128i vector )
+{
+    return v128_find_first_in_vector_32( vector, 0 );
+}
+
+/**
+ * v128_find_any_equal_xx
+ *      return a vector byte mask where a byte (_8), halfword (_16) or word (_32)
+ *      element of the source vector is equal to any byte (_8), halfword (_16) or
+ *      word (_32) element in the compare_to vector.
+ *
+ *      For each byte (_8), halfword (_16) or word (_32) of the source vector, the
+ *      result byte mask vector will contain:
+ *           byte (_8)      : 0xFF if found, otherwise 0x00
+ *           halfword (_16) : 0xFFFF if found, otherwise 0x0000
+ *           word (_32)     : 0xFFFFFFFF if found, otherwise 0x00000000
+ */
+
+static inline __m128i v128_find_any_equal_8( const __m128i source, const __m128i compare_to )
+{
+    return _mm_cmpestrm ( compare_to, 16, source, 16, _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_ANY | _SIDD_UNIT_MASK);
+}
+
+static inline __m128i v128_find_any_equal_16( const __m128i source, const __m128i compare_to )
+{
+    return _mm_cmpestrm ( compare_to, 16, source, 16, _SIDD_UWORD_OPS | _SIDD_CMP_EQUAL_ANY | _SIDD_UNIT_MASK);
+}
+
+static inline __m128i v128_find_any_equal_32( const __m128i source, const __m128i compare_to )
+{
+    int i;
+    __m128i temp;
+    QW      result;
+    QW      qw_s;
+
+    //required for MSVC: 'type cast': cannot convert from 'const __m128i' to 'QW'
+    qw_s.v = source;
+
+    result.v = v128_zero();
+    for (i=0; i < 4; i++)
+    {
+        temp = _mm_set1_epi32( qw_s.QW_F(i) );
+        temp = _mm_cmpeq_epi32( compare_to, temp );
+
+        if ( !_mm_testz_si128( temp, temp ) )
+        {
+            result.QW_F(i) = 0xFFFFFFFF;
+        }
+    }
+    return result.v;
+}
+
+/**
+ * v128_find_equal_xx
+ *      return a vector byte mask where a byte (_8), halfword (_16) or word (_32)
+ *      element of the source vector is equal to corresponding element in the
+ *      compare_to vector.
+ *
+ *      For each byte (_8), halfword (_16) or word (_32) of the source vector, the
+ *      result byte mask vector will contain:
+ *           byte (_8)      : 0xFF if equal, otherwise 0x00
+ *           halfword (_16) : 0xFFFF if equal, otherwise 0x0000
+ *           word (_32)     : 0xFFFFFFFF if equal, otherwise 0x00000000
+ */
+
+static inline __m128i v128_find_equal_8( const __m128i vec_a, const __m128i vec_b )
+{
+    return _mm_cmpeq_epi8( vec_a, vec_b );
+}
+
+static inline __m128i v128_find_equal_16( const __m128i vec_a, const __m128i vec_b )
+{
+    return _mm_cmpeq_epi16( vec_a, vec_b );
+}
+
+static inline __m128i v128_find_equal_32( const __m128i vec_a, const __m128i vec_b )
+{
+    return _mm_cmpeq_epi32( vec_a, vec_b );
+}
+
+/**
+ * v128_find_equal_zero_xx
+ *      return a vector byte mask where a byte (_8), halfword (_16) or word (_32)
+ *      element of the source vector is equal to zero.
+ *
+ *      For each byte (_8), halfword (_16) or word (_32) of the source vector, the
+ *      result byte mask vector will contain:
+ *           byte (_8)      : 0xFF if zero, otherwise 0x00
+ *           halfword (_16) : 0xFFFF if zero, otherwise 0x0000
+ *           word (_32)     : 0xFFFFFFFF if zero, otherwise 0x00000000
+ */
+
+static inline __m128i v128_find_equal_zero_8( const __m128i vec_a )
+{
+    return  _mm_cmpeq_epi8( vec_a, _mm_set1_epi8( 0 ) );
+}
+
+static inline __m128i v128_find_equal_zero_16( const __m128i vec_a )
+{
+    return  _mm_cmpeq_epi16( vec_a, _mm_set1_epi16( 0 ) );
+}
+
+static inline __m128i v128_find_equal_zero_32( const __m128i vec_a )
+{
+    return  _mm_cmpeq_epi32( vec_a, _mm_set1_epi32( 0 ) );
+}
+
+/**
+ * v128_bit_to_byte_mask
+ *      return a vector byte mask from a 16-bit bit mask
+ *      For each bit mask, the byte mask is 0xFF.
+ *
+ * reference:: https://stackoverflow.com/questions/67201469/convert-16-bits-mask-to-16-bytes-mask
+ */
+static inline __m128i v128_bit_to_byte_mask(U16 bitmap)
+{
+    const __m128i shuffle = _mm_setr_epi32( 0, 0, 0x01010101, 0x01010101);
+
+    const __m128i bitselect = _mm_setr_epi8(
+        1, 1<<1, 1<<2, 1<<3, 1<<4, 1<<5, 1<<6, 1U<<7,
+        1, 1<<1, 1<<2, 1<<3, 1<<4, 1<<5, 1<<6, 1U<<7 );
+
+    __m128i v = _mm_shuffle_epi8( _mm_cvtsi32_si128( bitmap ), shuffle );  // SSSE3 pshufb
+
+    v = _mm_and_si128( v, bitselect );
+    v = _mm_cmpeq_epi8( v, bitselect );       // non-zero -> 0xFF  :  0 -> 0x00
+
+    return v;
+}
+
+/**
+ * v128_isolate_string_xx
+ *      copy non-zero vector elements up to a zero element;
+ *      zero remaining elements
+ */
+static inline __m128i v128_isolate_string_8(__m128i string)
+{
+    __m128i mask;
+
+    //find a zero element
+    int fzi = v128_find_first_zero_in_vector_8( string );
+
+    // generate mask to isolate
+    fzi = 16 - fzi;
+    mask = _mm_cmpestrm ( string, 16, string, fzi,
+                _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_ANY | _SIDD_UNIT_MASK | _SIDD_NEGATIVE_POLARITY );
+
+    // printf(" v128_isolate_string_8: fzi=%d\n", fzi );
+    // u128_logmsg(" v128_isolate_string_8: mask: ", (U128) mask );
+
+    return _mm_and_si128( string, mask);
+}
+
+static inline __m128i v128_isolate_string_16(__m128i string)
+{
+    __m128i mask;
+
+    //find a zero element
+    int fzi = v128_find_first_zero_in_vector_16( string );
+
+    // generate mask to isolate
+    fzi = 8 - fzi;
+    mask = _mm_cmpestrm ( string, 8, string, fzi,
+                _SIDD_UWORD_OPS | _SIDD_CMP_EQUAL_ANY | _SIDD_UNIT_MASK | _SIDD_NEGATIVE_POLARITY );
+
+    return _mm_and_si128( string, mask);
+}
+
+/**
+ * v128_replicate_xx
+ *      generate a vector with all elements the same value
+ */
+
+static inline __m128i v128_replicate_8( U8 value ) {
+    return _mm_set1_epi8( value);
+}
+
+static inline __m128i v128_replicate_16( U16 value ) {
+    return _mm_set1_epi16( value);
+}
+
+static inline __m128i v128_replicate_32( U32 value ) {
+    return _mm_set1_epi32( value);
+}
+
+static inline __m128i v128_replicate_64( U64 value ) {
+    return _mm_set1_epi64x( value );
+}
+
+//=============================================================
+// v128 logical functions
+// - not, and, andnot, or, xor
+//=============================================================
+static inline __m128i v128_not( const __m128i a )
+{
+    return _mm_xor_si128( a, _mm_set1_epi8( 0xFF ) );
+}
+
+static inline __m128i v128_and( const __m128i a, const __m128i b )
+{
+    return _mm_and_si128( a, b );
+}
+
+// programmers note: b is Complemented! ie: a & ~b
+static inline __m128i v128_andnot( const __m128i a, const __m128i b )
+{
+    return _mm_andnot_si128( b, a );
+}
+
+static inline __m128i v128_or( const __m128i a, const __m128i b )
+{
+    return _mm_or_si128( a, b );
+}
+
+static inline __m128i v128_xor( const __m128i a, const __m128i b )
+{
+    return _mm_xor_si128( a, b );
+}
+
+//=============================================================
+// v128 shift left/right
+// - sll, srl, sra
+//=============================================================
+// element shift left logical
+static inline __m128i  v128_sll_8( const __m128i a, const U32 count )
+{
+    return v128_and( _mm_slli_epi64( a, count ), _mm_set1_epi8( 0xFF << count ) );
+}
+
+static inline __m128i v128_sll_16( const __m128i a, const U32 count )
+{
+    return _mm_sll_epi16( a, v128_set( count ) );
+}
+
+static inline __m128i v128_sll_32( const __m128i a, const U32 count )
+{
+    return _mm_sll_epi32( a, v128_set( count ) );
+}
+
+static inline __m128i v128_sll_64( const __m128i a, const U32 count )
+{
+    return _mm_sll_epi64( a, v128_set( count ) );
+}
+
+// element shift right logical
+static inline __m128i  v128_srl_8( const __m128i a, const U32 count )
+{
+    return v128_and( _mm_srli_epi64( a, count ), _mm_set1_epi8( 0xFF >> count ) );
+}
+
+static inline __m128i v128_srl_16( const __m128i a, const U32 count )
+{
+    return _mm_srl_epi16( a, v128_set( count ) );
+}
+
+static inline __m128i v128_srl_32( const __m128i a, const U32 count )
+{
+    return _mm_srl_epi32( a, v128_set( count ) );
+}
+
+static inline __m128i v128_srl_64( const __m128i a, const U32 count )
+{
+    return _mm_srl_epi64( a, v128_set( count ) );
+}
+
+// element shift right arithmetic
+static inline __m128i  v128_sra_8( const __m128i a, const U32 count )
+{   __m128i  hi, lo;
+
+    //     Convert signed 8-bit elements to signed 16-bit elements,
+    //     right shift arithmetic, make U8, and repack to 8-bit elements
+    hi = _mm_cvtepi8_epi16( _mm_bsrli_si128( a, 8) );
+    lo = _mm_cvtepi8_epi16( a );
+
+    hi = _mm_srai_epi16(hi, count);
+    hi = v128_and( hi, _mm_set1_epi16( 0x0FF ) );
+
+    lo = _mm_srai_epi16(lo, count);
+    lo = v128_and( lo, _mm_set1_epi16( 0x0FF ) );
+
+    return _mm_packus_epi16( lo, hi );
+}
+
+static inline __m128i v128_sra_16( const __m128i a, const U32 count )
+{
+    return _mm_sra_epi16( a, v128_set( count ) );
+}
+
+static inline __m128i v128_sra_32( const __m128i a, const U32 count )
+{
+    return _mm_sra_epi32( a, v128_set( count ) );
+}
+
+//=============================================================
+// v128 sign extend
+//=============================================================
+// element sign extend byte to double
+static inline __m128i v128_sign_extend_8_64( const __m128i a )
+{
+    __m128i mask = _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0);
+    return _mm_cvtepi8_epi64( _mm_shuffle_epi8( a , mask ) );
+}
+
+static inline __m128i v128_sign_extend_16_64( const __m128i a )
+{
+    __m128i mask = _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 4, 1, 0);
+    return _mm_cvtepi16_epi64( _mm_shuffle_epi8( a , mask ) );
+}
+
+static inline __m128i v128_sign_extend_32_64( const __m128i a )
+{
+    return _mm_cvtepi32_epi64( _mm_shuffle_epi32( a ,0x08 ) );
+}
+
+//=============================================================
+// v128 merge low
+//=============================================================
+// element merge low
+static inline __m128i v128_merge_low_8( const __m128i a, const __m128i b )
+{
+    return _mm_unpacklo_epi8( b, a );
+}
+
+static inline __m128i v128_merge_low_16( const __m128i a, const __m128i b )
+{
+    return _mm_unpacklo_epi16( b, a );
+}
+
+static inline __m128i v128_merge_low_32( const __m128i a, const __m128i b )
+{
+    return _mm_unpacklo_epi32( b, a );
+}
+
+static inline __m128i v128_merge_low_64( const __m128i a, const __m128i b )
+{
+    return _mm_unpacklo_epi64( b, a );
+}
+
+//=============================================================
+// v128 merge high
+//=============================================================
+// element merge high
+static inline __m128i v128_merge_high_8( const __m128i a, const __m128i b )
+{
+    return _mm_unpackhi_epi8( b, a );
+}
+
+static inline __m128i v128_merge_high_16( const __m128i a, const __m128i b )
+{
+    return _mm_unpackhi_epi16( b, a );
+}
+
+static inline __m128i v128_merge_high_32( const __m128i a, const __m128i b )
+{
+    return _mm_unpackhi_epi32( b, a );
+}
+
+static inline __m128i v128_merge_high_64( const __m128i a, const __m128i b )
+{
+    return _mm_unpackhi_epi64( b, a );
+}
+
+//=============================================================
+// v128 complement
+//=============================================================
+// element complement
+static inline __m128i v128_complement_8( const __m128i a )
+{
+    return _mm_add_epi8( v128_not( a ), _mm_set1_epi8( 1 ) );
+}
+
+static inline __m128i v128_complement_16( const __m128i a )
+{
+    return _mm_add_epi16( v128_not( a ), _mm_set1_epi16( 1 ) );
+}
+
+static inline __m128i v128_complement_32( const __m128i a )
+{
+    return _mm_add_epi32( v128_not( a ), _mm_set1_epi32( 1 ) );
+}
+
+static inline __m128i v128_complement_64( const __m128i a )
+{
+    return _mm_add_epi64( v128_not( a ), _mm_set1_epi64x( 1 ) );
+}
+
+
+//=============================================================
+// v128 pack
+//=============================================================
+static inline __m128i v128_pack_16(__m128i a, __m128i b)
+{
+    __m128i mask, lo, hi;
+
+    mask = _mm_set_epi8( 14, 12, 10, 8, 6, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 );
+    hi = _mm_shuffle_epi8( a , mask );
+    hi = _mm_and_si128( hi, _mm_set_epi64x (-1, 0))  ;
+    //u128_logmsg(" hi", (U128) hi);
+
+    mask = _mm_set_epi8( 0, 0, 0, 0, 0, 0, 0, 0, 14, 12, 10, 8, 6, 4, 2, 0 );
+    lo = _mm_shuffle_epi8( b , mask );
+    lo = _mm_and_si128( lo, _mm_set_epi64x (0, -1) )  ;
+    //u128_logmsg(" lo", (U128) lo);
+
+    return _mm_or_si128(lo, hi); // Combine the results
+}
+
+static inline __m128i v128_pack_32(__m128i a, __m128i b)
+{
+    __m128i mask, lo, hi;
+
+    mask = _mm_set_epi8( 13, 12, 9, 8, 5, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 );
+    hi = _mm_shuffle_epi8( a , mask );
+    hi = _mm_and_si128( hi, _mm_set_epi64x (-1, 0))  ;
+    //u128_logmsg(" hi", (U128) hi);
+
+    mask = _mm_set_epi8( 0, 0, 0, 0, 0, 0, 0, 0, 13, 12, 9, 8, 5, 4, 1, 0 );
+    lo = _mm_shuffle_epi8( b , mask );
+    lo = _mm_and_si128( lo, _mm_set_epi64x (0, -1) )  ;
+    //u128_logmsg(" lo", (U128) lo);
+
+    return _mm_or_si128(lo, hi); // Combine the results
+}
+
+static inline __m128i v128_pack_64(__m128i a, __m128i b)
+{
+    __m128i mask, lo, hi;
+
+    mask = _mm_set_epi8( 11, 10, 9, 8, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 );
+    hi = _mm_shuffle_epi8( a , mask );
+    hi = _mm_and_si128( hi, _mm_set_epi64x (-1, 0))  ;
+    //u128_logmsg(" hi", (U128) hi);
+
+    mask = _mm_set_epi8( 0, 0, 0, 0, 0, 0, 0, 0, 11, 10, 9, 8, 3, 2, 1, 0 );
+    lo = _mm_shuffle_epi8( b , mask );
+    lo = _mm_and_si128( lo, _mm_set_epi64x (0, -1) )  ;
+    //u128_logmsg(" lo", (U128) lo);
+
+    return _mm_or_si128(hi, lo); // Combine the results
+}
+
+
+//=============================================================
+// v128 pack saturate
+//=============================================================
+static inline __m128i v128_pack_saturate_16(__m128i a, __m128i b) {
+    __m128i mask_sat, mask_sat_pos, mask_sat_neg;
+    __m128i lo, hi;
+
+    /* hi vector - a */
+    mask_sat_pos = _mm_cmpgt_epi16( a, _mm_set1_epi16( 0x007F ) );
+    mask_sat_neg = _mm_cmplt_epi16( a, _mm_set1_epi16( 0xFF80 ) );
+    mask_sat = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    hi = v128_andnot( a, mask_sat );                                       /* not saturated elements */
+    hi = v128_or(hi, v128_and( mask_sat_pos, _mm_set1_epi16( 0x7F ) ) );   /* positive saturated elements*/
+    hi = v128_or(hi, v128_and( mask_sat_neg, _mm_set1_epi16( 0x80 ) ) );   /* negative saturated elements*/
+
+    mask_sat_pos = _mm_cmpgt_epi16( b, _mm_set1_epi16( 0x007F ) );
+    mask_sat_neg = _mm_cmplt_epi16( b, _mm_set1_epi16( 0xFF80 ) );
+    mask_sat = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    lo = v128_andnot( b, mask_sat );                                       /* not saturated elements */
+    lo = v128_or(lo, v128_and( mask_sat_pos, _mm_set1_epi16( 0x7F ) ) );   /* positive saturated elements*/
+    lo = v128_or(lo, v128_and( mask_sat_neg, _mm_set1_epi16( 0x80 ) ) );   /* negative saturated elements*/
+
+    return v128_pack_16( hi, lo);
+}
+
+static inline __m128i v128_pack_saturate_32(__m128i a, __m128i b) {
+    __m128i mask_sat, mask_sat_pos, mask_sat_neg;
+    __m128i lo, hi;
+
+    /* hi vector - a */
+    mask_sat_pos = _mm_cmpgt_epi32( a, _mm_set1_epi32( 0x00007FFF ) );
+    mask_sat_neg = _mm_cmplt_epi32( a, _mm_set1_epi32( 0xFFFF8000 ) );
+    mask_sat = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    hi = v128_andnot( a, mask_sat );                                         /* not saturated elements */
+    hi = v128_or(hi, v128_and( mask_sat_pos, _mm_set1_epi32( 0x7FFF ) ) );   /* positive saturated elements*/
+    hi = v128_or(hi, v128_and( mask_sat_neg, _mm_set1_epi32( 0x8000 ) ) );   /* negative saturated elements*/
+
+    /* lo vector - b */
+    mask_sat_pos = _mm_cmpgt_epi32( b, _mm_set1_epi32( 0x00007FFF ) );
+    mask_sat_neg = _mm_cmplt_epi32( b, _mm_set1_epi32( 0xFFFF8000 ) );
+    mask_sat = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    lo = v128_andnot( b, mask_sat );                                         /* not saturated elements */
+    lo = v128_or(lo, v128_and( mask_sat_pos, _mm_set1_epi32( 0x7FFF ) ) );   /* positive saturated elements*/
+    lo = v128_or(lo, v128_and( mask_sat_neg, _mm_set1_epi32( 0x8000 ) ) );   /* nagative saturated elements*/
+
+    return v128_pack_32( hi, lo);
+}
+
+static inline __m128i v128_pack_saturate_64(__m128i a, __m128i b) {
+    __m128i mask_sat, mask_sat_pos, mask_sat_neg;
+    __m128i lo, hi;
+
+    /* hi vector - a */
+    /* note: no cmplt for epi64 */
+    mask_sat_pos = _mm_cmpgt_epi64( a, _mm_set1_epi64x( 0x000000007FFFFFFFull ) );
+    mask_sat_neg = v128_not( _mm_cmpgt_epi64( a, _mm_set1_epi64x( 0xFFFFFFFF7FFFFFFFull ) ) );
+    mask_sat = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    hi = v128_andnot( a, mask_sat );                                              /* not saturated elements */
+    hi = v128_or(hi, v128_and( mask_sat_pos, _mm_set1_epi64x( 0x7FFFFFFF ) ) );   /* positive saturated elements*/
+    hi = v128_or(hi, v128_and( mask_sat_neg, _mm_set1_epi64x( 0x80000000 ) ) );   /* negative saturated elements*/
+
+    /* lo vector - b */
+    /* note: no cmplt for epi64 */
+    mask_sat_pos = _mm_cmpgt_epi64( b, _mm_set1_epi64x( 0x000000007FFFFFFFull ) );
+    mask_sat_neg = v128_not( _mm_cmpgt_epi64( b, _mm_set1_epi64x( 0xFFFFFFFF7FFFFFFFull ) ) );
+    mask_sat = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    lo = v128_andnot( b, mask_sat );                                              /* not saturated elements */
+    lo = v128_or(lo, v128_and( mask_sat_pos, _mm_set1_epi64x( 0x7FFFFFFF ) ) );   /* positive saturated elements*/
+    lo = v128_or(lo, v128_and( mask_sat_neg, _mm_set1_epi64x( 0x80000000 ) ) );   /* nagative saturated elements*/
+
+    return v128_pack_64( hi, lo);
+}
+
+//=============================================================
+// v128 pack saturate condition code
+//=============================================================
+static inline int v128_pack_saturate_cc_16(__m128i a, __m128i b) {
+    __m128i mask, mask_hi, mask_lo;
+    __m128i mask_sat_pos, mask_sat_neg;
+    int     cc;
+
+    /* hi vector - a */
+    mask_sat_pos = _mm_cmpgt_epi16( a, _mm_set1_epi16( 0x007F ) );
+    mask_sat_neg = _mm_cmplt_epi16( a, _mm_set1_epi16( 0xFF80 ) );
+    mask_hi = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    //u128_logmsg(" mask_hi ", (U128) mask_hi );
+
+    mask_sat_pos = _mm_cmpgt_epi16( b, _mm_set1_epi16( 0x007F ) );
+    mask_sat_neg = _mm_cmplt_epi16( b, _mm_set1_epi16( 0xFF80 ) );
+    mask_lo = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    //u128_logmsg(" mask_lo ", (U128) mask_lo );
+
+    mask = v128_pack_16( mask_hi, mask_lo);
+    //u128_logmsg(" mask   ", (U128) mask );
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 0;                // No saturation
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 3;            // Saturation on all elements
+        else
+            cc = 1;            // At least one but not all elements saturated
+    }
+
+    return cc;
+}
+
+static inline int v128_pack_saturate_cc_32(__m128i a, __m128i b) {
+    __m128i mask, mask_hi, mask_lo;
+    __m128i mask_sat_pos, mask_sat_neg;
+    int     cc;
+
+    /* hi vector - a */
+    mask_sat_pos = _mm_cmpgt_epi32( a, _mm_set1_epi32( 0x00007FFF ) );
+    mask_sat_neg = _mm_cmplt_epi32( a, _mm_set1_epi32( 0xFFFF8000 ) );
+    mask_hi = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    //u128_logmsg(" mask_hi ", (U128) mask_hi );
+
+    mask_sat_pos = _mm_cmpgt_epi32( b, _mm_set1_epi32( 0x00007FFF ) );
+    mask_sat_neg = _mm_cmplt_epi32( b, _mm_set1_epi32( 0xFFFF8000 ) );
+    mask_lo = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    //u128_logmsg(" mask_lo ", (U128) mask_lo );
+
+    mask = v128_pack_32( mask_hi, mask_lo);
+    //u128_logmsg(" mask   ", (U128) mask );
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 0;                // No saturation
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 3;            // Saturation on all elements
+        else
+            cc = 1;            // At least one but not all elements saturated
+    }
+
+    return cc;
+}
+
+static inline int v128_pack_saturate_cc_64(__m128i a, __m128i b) {
+    __m128i mask, mask_hi, mask_lo;
+    __m128i mask_sat_pos, mask_sat_neg;
+    int     cc;
+
+    /* hi vector - a */
+    /* note: no cmplt for epi64 */
+    mask_sat_pos = _mm_cmpgt_epi64( a, _mm_set1_epi64x( 0x000000007FFFFFFFull ) );
+    mask_sat_neg = v128_not( _mm_cmpgt_epi64( a, _mm_set1_epi64x( 0xFFFFFFFF7FFFFFFFull ) ) );
+    mask_hi = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    //u128_logmsg(" mask_hi ", (U128) mask_hi );
+
+    /* note: no cmplt for epi64 */
+    mask_sat_pos = _mm_cmpgt_epi64( b, _mm_set1_epi64x( 0x000000007FFFFFFFull ) );
+    mask_sat_neg = v128_not( _mm_cmpgt_epi64( b, _mm_set1_epi64x( 0xFFFFFFFF7FFFFFFFull ) ) );
+    mask_lo = _mm_or_si128( mask_sat_pos, mask_sat_neg);
+    //u128_logmsg(" mask_lo ", (U128) mask_lo );
+
+    mask = v128_pack_64( mask_hi, mask_lo);
+    //u128_logmsg(" mask   ", (U128) mask );
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 0;                // No saturation
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 3;            // Saturation on all elements
+        else
+            cc = 1;            // At least one but not all elements saturated
+    }
+
+    return cc;
+}
+
+
+//=============================================================
+// v128 pack logical saturate
+//=============================================================
+static inline __m128i v128_pack_logical_saturate_16(__m128i a, __m128i b) {
+    __m128i mask_sat;
+    __m128i temp, lo, hi;
+
+    /* hi vector - a */
+    /* zero low half of half-words */
+    temp = v128_and( a, _mm_set_epi8( -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0 ) );
+    mask_sat = v128_not( _mm_cmpeq_epi16( temp, v128_zero() ) );        /* satuaration mask; upper half non-zero */
+    hi = v128_andnot( a, mask_sat );                                    /* not saturated elements */
+    hi = v128_or( hi, v128_and( mask_sat, _mm_set1_epi16( 0xFF ) ) );   /* saturated elements */
+    //u128_logmsg(" mask_hi ", (U128) mask_sat );
+
+    /* lo vector - b */
+    /* zero low half of half-words */
+    temp = v128_and( b, _mm_set_epi8( -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0 ) );
+    mask_sat = v128_not( _mm_cmpeq_epi16( temp, v128_zero() ) );        /* satuaration mask; upper half non-zero */
+    lo = v128_andnot( b, mask_sat );                                    /* not saturated elements */
+    lo = v128_or( lo, v128_and( mask_sat, _mm_set1_epi16( 0xFF ) ) );   /* saturated elements */
+    //u128_logmsg(" mask_lo ", (U128) mask_sat );
+
+    return v128_pack_16( hi, lo);
+}
+
+static inline __m128i v128_pack_logical_saturate_32(__m128i a, __m128i b) {
+    __m128i mask_sat;
+    __m128i temp, lo, hi;
+
+    /* hi vector - a */
+    temp = v128_and( a, _mm_set_epi16( -1, 0, -1, 0, -1, 0, -1, 0 ) );    /* zero low half of words */
+    mask_sat = v128_not( _mm_cmpeq_epi32( temp, v128_zero() ) );          /* satuaration mask; upper half non-zero */
+    hi = v128_andnot( a, mask_sat );                                      /* not saturated elements */
+    hi = v128_or( hi, v128_and( mask_sat, _mm_set1_epi32( 0xFFFF ) ) );   /* saturated elements */
+    //u128_logmsg(" mask_hi ", (U128) mask_sat );
+
+    /* lo vector - b */
+    temp = v128_and( b, _mm_set_epi16( -1, 0, -1, 0, -1, 0, -1, 0 ) );    /* zero low half of words */
+    mask_sat = v128_not( _mm_cmpeq_epi32( temp, v128_zero() ) );          /* satuaration mask; upper half non-zero */
+    lo = v128_andnot( b, mask_sat );                                      /* not saturated elements */
+    lo = v128_or( lo, v128_and( mask_sat, _mm_set1_epi32( 0xFFFF ) ) );   /* saturated elements */
+    //u128_logmsg(" mask_lo ", (U128) mask_sat );
+
+    return v128_pack_32( hi, lo);
+}
+
+static inline __m128i v128_pack_logical_saturate_64(__m128i a, __m128i b) {
+    __m128i mask_sat;
+    __m128i temp, lo, hi;
+
+    /* hi vector - a */
+    temp = v128_and( a, _mm_set_epi32( -1, 0, -1, 0 ) );                   /* zero low half of double words */
+    mask_sat = v128_not( _mm_cmpeq_epi64( temp, v128_zero() ) );  /* satuaration mask; upper half non-zero */
+    hi = v128_andnot( a, mask_sat );                                             /* not saturated elements */
+    hi = v128_or(hi, v128_and( mask_sat, _mm_set1_epi64x( 0xFFFFFFFF ) ) );          /* saturated elements */
+    //u128_logmsg(" mask_hi ", (U128) mask_sat );
+
+    /* lo vector - b */
+    temp = v128_and( b, _mm_set_epi32( -1, 0, -1, 0 ) );                   /* zero low half of double words */
+    mask_sat = v128_not( _mm_cmpeq_epi64( temp, v128_zero() ) );  /* satuaration mask; upper half non-zero */
+    lo = v128_andnot( b, mask_sat );                                             /* not saturated elements */
+    lo = v128_or(lo, v128_and( mask_sat, _mm_set1_epi64x( 0xFFFFFFFF ) ) );          /* saturated elements */
+    //u128_logmsg(" mask_lo ", (U128) mask_sat );
+
+    return v128_pack_64( hi, lo);
+}
+
+//=============================================================
+// v128 pack saturate condition code
+//=============================================================
+static inline int v128_pack_logical_saturate_cc_16(__m128i a, __m128i b) {
+    __m128i mask, mask_hi, mask_lo;
+    __m128i temp;
+    int     cc;
+
+    /* hi vector - a */
+    /* zero low half of half-words */
+    temp = v128_and( a, _mm_set_epi8( -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0 ) );
+    mask_hi = v128_not( _mm_cmpeq_epi16( temp, v128_zero() ) );
+    //u128_logmsg(" mask_hi ", (U128) mask_hi );
+
+    temp = v128_and( b, _mm_set_epi8( -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0 ) );
+    mask_lo = v128_not( _mm_cmpeq_epi16( temp, v128_zero() ) );
+    //u128_logmsg(" mask_lo ", (U128) mask_lo );
+
+    mask = v128_pack_16( mask_hi, mask_lo);
+    //u128_logmsg(" mask   ", (U128) mask );
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 0;                // No saturation
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 3;            // Saturation on all elements
+        else
+            cc = 1;            // At least one but not all elements saturated
+    }
+
+    return cc;
+}
+
+static inline int v128_pack_logical_saturate_cc_32(__m128i a, __m128i b) {
+    __m128i mask, mask_hi, mask_lo;
+    __m128i temp;
+    int     cc;
+
+    /* hi vector - a */
+    temp = v128_and( a, _mm_set_epi16( -1, 0, -1, 0, -1, 0, -1, 0 ) );          /* zero low half of words */
+    mask_hi = v128_not( _mm_cmpeq_epi32( temp, v128_zero() ) );  /* satuaration mask; upper half non-zero */
+    //u128_logmsg(" mask_hi ", (U128) mask_hi );
+
+    temp = v128_and( b, _mm_set_epi16( -1, 0, -1, 0, -1, 0, -1, 0 ) );         /* zero low half of  words */
+    mask_lo = v128_not( _mm_cmpeq_epi32( temp, v128_zero() ) );  /* satuaration mask; upper half non-zero */
+    //u128_logmsg(" mask_lo ", (U128) mask_lo );
+
+    mask = v128_pack_32( mask_hi, mask_lo);
+    //u128_logmsg(" mask   ", (U128) mask );
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 0;                // No saturation
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 3;            // Saturation on all elements
+        else
+            cc = 1;            // At least one but not all elements saturated
+    }
+
+    return cc;
+}
+
+static inline int v128_pack_logical_saturate_cc_64(__m128i a, __m128i b) {
+    __m128i mask, mask_hi, mask_lo;
+    __m128i temp;
+    int     cc;
+
+    /* hi vector - a */
+    temp = v128_and( a, _mm_set_epi32( -1, 0, -1, 0 ) );                   /* zero low half of double words */
+    mask_hi = v128_not( _mm_cmpeq_epi64( temp, v128_zero() ) );  /* satuaration mask; upper half non-zero */
+    //u128_logmsg(" mask_hi ", (U128) mask_hi );
+
+    /* lo vector - b */
+    temp = v128_and( b, _mm_set_epi32( -1, 0, -1, 0 ) );                   /* zero low half of double words */
+    mask_lo = v128_not( _mm_cmpeq_epi64( temp, v128_zero() ) );  /* satuaration mask; upper half non-zero */
+    //u128_logmsg(" mask_lo ", (U128) mask_lo );
+
+    mask = v128_pack_64( mask_hi, mask_lo);
+    //u128_logmsg(" mask   ", (U128) mask );
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 0;                // No saturation
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 3;            // Saturation on all elements
+        else
+            cc = 1;            // At least one but not all elements saturated
+    }
+
+    return cc;
+}
+
+//=============================================================
+// v128 unpack logical low
+//=============================================================
+// element unpack logical low
+static inline __m128i v128_unpack_logical_low_8( const __m128i a )
+{
+    return _mm_cvtepu8_epi16( a );
+}
+
+static inline __m128i v128_unpack_logical_low_16( const __m128i a )
+{
+    return _mm_cvtepu16_epi32( a );
+}
+
+static inline __m128i v128_unpack_logical_low_32( const __m128i a )
+{
+    return _mm_cvtepu32_epi64( a );
+}
+
+//=============================================================
+// v128 unpack logical high
+//=============================================================
+// element unpack logical high
+static inline __m128i v128_unpack_logical_high_8( const __m128i a )
+{
+    return _mm_cvtepu8_epi16( _mm_shuffle_epi32 ( a, 0x0E ) );
+}
+
+static inline __m128i v128_unpack_logical_high_16( const __m128i a )
+{
+    return _mm_cvtepu16_epi32( _mm_shuffle_epi32 ( a, 0x0E )  );
+}
+
+static inline __m128i v128_unpack_logical_high_32( const __m128i a )
+{
+    return _mm_cvtepu32_epi64( _mm_shuffle_epi32 ( a, 0x0E )  );
+}
+
+//=============================================================
+// v128 unpack low
+//=============================================================
+// element unpack low
+static inline __m128i v128_unpack_low_8( const __m128i a )
+{
+    return _mm_cvtepi8_epi16( a );
+}
+
+static inline __m128i v128_unpack_low_16( const __m128i a )
+{
+    return _mm_cvtepi16_epi32( a );
+}
+
+static inline __m128i v128_unpack_low_32( const __m128i a )
+{
+    return _mm_cvtepi32_epi64( a );
+}
+
+//=============================================================
+// v128 unpack high
+//=============================================================
+// element unpack high
+static inline __m128i v128_unpack_high_8( const __m128i a )
+{
+    return _mm_cvtepi8_epi16( _mm_shuffle_epi32 ( a, 0x0E ) );
+}
+
+static inline __m128i v128_unpack_high_16( const __m128i a )
+{
+    return _mm_cvtepi16_epi32( _mm_shuffle_epi32 ( a, 0x0E )  );
+}
+
+static inline __m128i v128_unpack_high_32( const __m128i a )
+{
+    return _mm_cvtepi32_epi64( _mm_shuffle_epi32 ( a, 0x0E )  );
+}
+
+//=============================================================
+// v128 compare equal
+//=============================================================
+// element compare equal
+static inline __m128i v128_compare_equal_8( const __m128i a, const __m128i b )
+{
+    return _mm_cmpeq_epi8( a, b );
+}
+
+static inline __m128i v128_compare_equal_16( const __m128i a, const __m128i b )
+{
+    return _mm_cmpeq_epi16( a, b );
+}
+
+static inline __m128i v128_compare_equal_32( const __m128i a, const __m128i b )
+{
+    return _mm_cmpeq_epi32( a, b );
+}
+
+static inline __m128i v128_compare_equal_64( const __m128i a, const __m128i b )
+{
+    return _mm_cmpeq_epi64( a, b );
+}
+
+//=============================================================
+// v128 compare equal condition code
+//=============================================================
+static inline int v128_compare_equal_cc( const __m128i mask )
+{
+    int     cc;
+
+    if ( _mm_testz_si128 ( mask, _mm_set1_epi64x(-1) ) )
+    {
+        cc = 3;         // No elements equal
+    }
+    else
+    {
+        if ( _mm_movemask_epi8( mask ) == 0xFFFF )
+            cc = 0;     // All equal
+        else
+            cc = 1;     // At least one but not all elements equal
+    }
+
+    return cc;
+}
+
+
+//=============================================================
+// v128 compare high
+//=============================================================
+// element compare high
+static inline __m128i v128_compare_high_8( const __m128i a, const __m128i b )
+{
+    return _mm_cmpgt_epi8( a, b );
+}
+
+static inline __m128i v128_compare_high_16( const __m128i a, const __m128i b )
+{
+    return _mm_cmpgt_epi16( a, b );
+}
+
+static inline __m128i v128_compare_high_32( const __m128i a, const __m128i b )
+{
+    return _mm_cmpgt_epi32( a, b );
+}
+
+static inline __m128i v128_compare_high_64( const __m128i a, const __m128i b )
+{
+    return _mm_cmpgt_epi64( a, b );
+}
+
+//=============================================================
+// v128 compare hign condition code
+//=============================================================
+static inline int v128_compare_high_cc( const __m128i mask )
+{
+    return v128_compare_equal_cc ( mask );
+}
+
+
+//=============================================================
+// v128 compare high logical
+//=============================================================
+// reference: https://stackoverflow.com/questions/56526082/is-there-a-way-to-subtract-packed-unsigned-doublewords-saturated-on-x86-using
+// element compare high
+static inline __m128i v128_compare_high_logical_8( const __m128i a, const __m128i b )
+{
+    const __m128i highbit = _mm_set1_epi8( 0x80 );
+
+    return _mm_cmpgt_epi8( _mm_xor_si128( a, highbit ), _mm_xor_si128( b, highbit ) );
+}
+
+static inline __m128i v128_compare_high_logical_16( const __m128i a, const __m128i b )
+{
+    const __m128i highbit = _mm_set1_epi16( 0x8000 );
+
+    return _mm_cmpgt_epi16( _mm_xor_si128( a, highbit ), _mm_xor_si128( b, highbit ) );
+}
+
+static inline __m128i v128_compare_high_logical_32( const __m128i a, const __m128i b )
+{
+    const __m128i highbit = _mm_set1_epi32( 0x80000000 );
+
+    return _mm_cmpgt_epi32( _mm_xor_si128( a, highbit ), _mm_xor_si128( b, highbit ) );
+}
+
+static inline __m128i v128_compare_high_logical_64( const __m128i a, const __m128i b )
+{
+    const __m128i highest = _mm_set1_epi64x( 0x8000000000000000ull );
+
+    return _mm_cmpgt_epi64( _mm_xor_si128( a, highest ), _mm_xor_si128( b, highest ) );
+}
+
+//=============================================================
+// v128 compare hign logical condition code
+//=============================================================
+static inline int v128_compare_high_logical_cc( const __m128i mask )
+{
+    return v128_compare_equal_cc ( mask );
+}
+
+/*
+Note: v128 shift left/right ... byte: use little endian array indexes!!
+*/
+
+//=============================================================
+// v128 shift left byte
+//=============================================================
+static inline __m128i  v128_shift_left_byte( const __m128i a, int shift )
+{
+    union{__m128i v[2]; U8 b[32]; } temp;
+
+    temp.v[0] = v128_zero();
+    temp.v[1] = a;
+
+    return _mm_lddqu_si128( (__m128i *) &(temp.b[16-(shift%16)]) ) ;
+}
+//=============================================================
+// v128 shift left double byte
+//=============================================================
+static inline __m128i  v128_shift_left_double_byte( const __m128i a, const __m128i b, int shift )
+{
+    union{__m128i v[2]; U8 b[32]; } temp;
+
+    temp.v[0] = b;
+    temp.v[1] = a;
+
+    return _mm_lddqu_si128( (__m128i *) &(temp.b[16-(shift%16)]) ) ;
+}
+
+//=============================================================
+// v128 shift right logical byte
+//=============================================================
+static inline __m128i  v128_shift_right_logical_byte( const __m128i a, int shift )
+{
+    union{__m128i v[2]; U8 b[32]; } temp;
+
+    temp.v[0] = a;
+    temp.v[1] = v128_zero();
+
+    return _mm_lddqu_si128( (__m128i *) &(temp.b[(16-shift%16)]) ) ;
+}
+
+//=============================================================
+// v128 shift right arithmetic byte
+//=============================================================
+static inline __m128i  v128_shift_right_arithmetic_byte( const __m128i a, int shift )
+{
+    union{__m128i v[2]; U8 b[32]; } temp;
+
+    temp.v[0] = a;
+    temp.v[1] = temp.b[15] & 0x80 ? _mm_set1_epi64x(-1) : v128_zero();
+
+    return _mm_lddqu_si128( (__m128i *) &(temp.b[(16-shift%16)]) ) ;
+}
+
+
+//=============================================================
+// v128 permute
+//=============================================================
+static inline __m128i  v128_permute( const __m128i v2, const __m128i v3, const __m128i v4 )
+{
+    __m128i mask_v4_gt15, shuf_v4, tv4;
+    __m128i result_v2, result_v3;
+
+    tv4 = v128_and( v4, _mm_set1_epi8( 0x1f ) );
+    mask_v4_gt15 = _mm_cmpgt_epi8( v4, _mm_set1_epi8 (15) );
+
+    shuf_v4 = v128_and( _mm_sub_epi8 ( _mm_set1_epi8 (31), tv4 ), mask_v4_gt15 ) ;
+    result_v3 = _mm_shuffle_epi8( v3, shuf_v4);
+
+    shuf_v4 = v128_andnot( _mm_sub_epi8 ( _mm_set1_epi8 (15), tv4 ), mask_v4_gt15 ) ;
+    result_v2 = _mm_shuffle_epi8( v2, shuf_v4 );
+
+    return _mm_blendv_epi8( result_v2, result_v3, mask_v4_gt15 );
+}
+
+
+//=============================================================
+// v128 bit permute
+//=============================================================
+static inline int  v128_bit_permute( const __m128i v2, const __m128i v3 )
+{
+    __m128i  bit_in_byte, byte_in_sv, bit_in_byte_mask, bit_mask;
+    __m128i  temp;
+
+    // get byte and bit_in_byte of the source vector
+    bit_in_byte = v128_and( v3, _mm_set1_epi8( 0x07 ) );
+    byte_in_sv = v128_srl_8( v3, 3 );
+
+    // get source vector bytes
+    temp = v128_permute( v2, v128_zero(), byte_in_sv );
+
+    bit_mask = _mm_set_epi8( 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80 );
+    bit_in_byte_mask = _mm_shuffle_epi8( bit_mask, bit_in_byte);
+
+    temp = v128_and( temp, bit_in_byte_mask);
+    temp = v128_not( _mm_cmpeq_epi8( temp, v128_zero() ) );
+
+    return _mm_movemask_epi8( temp );
+}
+
+/* restore "unused-function" warnings */
+#if defined(__GNUC__) && !defined(__clang__)
+    #pragma GCC diagnostic pop
+#elif defined(__GNUC__) && defined(__clang__)
+    #pragma clang diagnostic pop
+#endif
+
+#endif /* defined( FEATURE_V128_SSE )*/
 
 /*-------------------------------------------------------------------*/
 /* Galois Field Multiply                                             */
@@ -401,11 +1736,11 @@ static inline U64 gf_mul_32( U32 m1, U32 m2)
         QW  mm2;                      /* U128 m2                       */
         QW  acc;                      /* U128 accumulator              */
 
-        mm1.v = _mm_setzero_si128();
+        mm1.v = v128_zero();
         mm1.D.L.D = m1;
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_32 mm1.v", mm1.D.H.D, mm1.D.L.D);
 
-        mm2.v = _mm_setzero_si128();
+        mm2.v = v128_zero();
         mm2.D.L.D = m2;
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_32 mm2.v", mm2.D.H.D, mm2.D.L.D);
 
@@ -474,11 +1809,11 @@ static inline void gf_mul_64( U64 m1, U64 m2, U64* accu128h, U64* accu128l)
         QW  mm2;                      /* U128 m2                       */
         QW  acc;                      /* U128 accumulator              */
 
-        mm1.v = _mm_setzero_si128();
+        mm1.v = v128_zero();
         mm1.D.L.D = m1;
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_64 mm1.v", mm1.D.H.D, mm1.D.L.D);
 
-        mm2.v = _mm_setzero_si128();
+        mm2.v = v128_zero();
         mm2.D.L.D = m2;
             //logmsg("%s: u128=%16.16"PRIX64".%16.16"PRIX64" \n", "gf_mul_64 mm2.v", mm2.D.H.D, mm2.D.L.D);
 
@@ -634,8 +1969,8 @@ DEF_INST( vector_load_logical_element_and_zero )
     ZVECTOR_CHECK( regs );
     PER_ZEROADDR_XCHECK2( regs, x2, b2 );
 
-#if defined(_M_X64) || defined( __SSE2__ )
-    regs->VR_Q( v1 ).v = _mm_setzero_si128();
+#if defined( FEATURE_V128_SSE )
+    regs->VR_Q( v1 ).v = v128_zero();
 #else
     regs->VR_D(v1, 0) = 0x00;
     regs->VR_D(v1, 1) = 0x00;
@@ -669,26 +2004,45 @@ DEF_INST( vector_load_and_replicate )
     ZVECTOR_CHECK( regs );
     PER_ZEROADDR_XCHECK2( regs, x2, b2 );
 
+    /* remove potential warning: unused variable ‘i’ */
+    UNREFERENCED( i );
+
     switch (m3)
     {
     case 0:
-        regs->VR_B( v1, 0 ) = ARCH_DEP( vfetchb )( effective_addr2, b2, regs );
-        for (i=1; i < 16; i++)
-            regs->VR_B( v1, i ) = regs->VR_B( v1, 0 );
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_8( ARCH_DEP( vfetchb )( effective_addr2, b2, regs ) );
+        #else
+            regs->VR_B( v1, 0 ) = ARCH_DEP( vfetchb )( effective_addr2, b2, regs );
+            for (i=1; i < 16; i++)
+                regs->VR_B( v1, i ) = regs->VR_B( v1, 0 );
+        #endif
         break;
     case 1:
-        regs->VR_H( v1, 0 ) = ARCH_DEP( vfetch2 )( effective_addr2, b2, regs );
-        for (i=1; i < 8; i++)
-            regs->VR_H( v1, i ) = regs->VR_H( v1, 0 );
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_16( ARCH_DEP( vfetch2 )( effective_addr2, b2, regs ) );
+        #else
+            regs->VR_H( v1, 0 ) = ARCH_DEP( vfetch2 )( effective_addr2, b2, regs );
+            for (i=1; i < 8; i++)
+                regs->VR_H( v1, i ) = regs->VR_H( v1, 0 );
+        #endif
         break;
     case 2:
-        regs->VR_F( v1, 0 ) = ARCH_DEP( vfetch4 )( effective_addr2, b2, regs );
-        for (i=1; i < 4; i++)
-            regs->VR_F( v1, i ) = regs->VR_F( v1, 0 );
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_32( ARCH_DEP( vfetch4 )( effective_addr2, b2, regs ) );
+        #else
+            regs->VR_F( v1, 0 ) = ARCH_DEP( vfetch4 )( effective_addr2, b2, regs );
+            for (i=1; i < 4; i++)
+                regs->VR_F( v1, i ) = regs->VR_F( v1, 0 );
+        #endif
         break;
     case 3:
-        regs->VR_D( v1, 0 ) = ARCH_DEP( vfetch8 )( effective_addr2, b2, regs );
-        regs->VR_D( v1, 1 ) = regs->VR_D( v1, 0 );
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_64( ARCH_DEP( vfetch8 )( effective_addr2, b2, regs ) );
+        #else
+            regs->VR_D( v1, 0 ) = ARCH_DEP( vfetch8 )( effective_addr2, b2, regs );
+            regs->VR_D( v1, 1 ) = regs->VR_D( v1, 0 );
+        #endif
         break;
     default:
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -1127,29 +2481,47 @@ DEF_INST( vector_element_shift_left )
 
     ZVECTOR_CHECK( regs );
 
+    UNREFERENCED( i );      // maybe unreferenced
+
     shift = effective_addr2 & 0xFFF;  // Isolate number of bit positions
 
     switch (m4)
     {
     case 0:
         shift %= 8;
-        for (i=0; i < 16; i++)
-            regs->VR_B( v1, i ) = regs->VR_B( v3, i ) << shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_sll_8( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 16; i++)
+                regs->VR_B( v1, i ) = regs->VR_B( v3, i ) << shift;
+        #endif
         break;
     case 1:
         shift %= 16;
-        for (i=0; i < 8; i++)
-            regs->VR_H( v1, i ) = regs->VR_H( v3, i ) << shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_sll_16( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 8; i++)
+                regs->VR_H( v1, i ) = regs->VR_H( v3, i ) << shift;
+        #endif
         break;
     case 2:
         shift %= 32;
-        for (i=0; i < 4; i++)
-            regs->VR_F( v1, i ) = regs->VR_F( v3, i ) << shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_sll_32( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 4; i++)
+                regs->VR_F( v1, i ) = regs->VR_F( v3, i ) << shift;
+        #endif
         break;
     case 3:
         shift %= 64;
-        for (i=0; i < 2; i++)
-            regs->VR_D( v1, i ) = regs->VR_D( v3, i ) << shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_sll_64( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 2; i++)
+                regs->VR_D( v1, i ) = regs->VR_D( v3, i ) << shift;
+        #endif
         break;
     default:
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -1171,6 +2543,8 @@ DEF_INST( vector_element_rotate_left_logical )
 
     ZVECTOR_CHECK( regs );
 
+    UNREFERENCED( i );      // maybe unreferenced
+
     rotl = effective_addr2 & 0xFFF;  // Isolate number of bit positions
 
     switch (m4)
@@ -1178,26 +2552,42 @@ DEF_INST( vector_element_rotate_left_logical )
     case 0:
         rotl %= 8;
         rotr = -rotl & 7;
-        for (i=0; i < 16; i++)
-            regs->VR_B( v1, i ) = (regs->VR_B( v3, i ) << rotl) | (regs->VR_B( v3, i ) >> rotr);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_or( v128_sll_8( regs->VR_Q(v3).v, rotl ), v128_srl_8( regs->VR_Q(v3).v, rotr ) );
+        #else
+            for (i=0; i < 16; i++)
+                regs->VR_B( v1, i ) = (regs->VR_B( v3, i ) << rotl) | (regs->VR_B( v3, i ) >> rotr);
+        #endif
         break;
     case 1:
         rotl %= 16;
         rotr = -rotl & 15;
-        for (i=0; i < 8; i++)
-            regs->VR_H( v1, i ) = (regs->VR_H( v3, i ) << rotl) | (regs->VR_H( v3, i ) >> rotr);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_or( v128_sll_16( regs->VR_Q(v3).v, rotl ), v128_srl_16( regs->VR_Q(v3).v, rotr ) );
+        #else
+            for (i=0; i < 8; i++)
+                regs->VR_H( v1, i ) = (regs->VR_H( v3, i ) << rotl) | (regs->VR_H( v3, i ) >> rotr);
+        #endif
         break;
     case 2:
         rotl %= 32;
         rotr = -rotl & 31;
-        for (i=0; i < 4; i++)
-            regs->VR_F( v1, i ) = (regs->VR_F( v3, i ) << rotl) | (regs->VR_F( v3, i ) >> rotr);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_or( v128_sll_32( regs->VR_Q(v3).v, rotl ), v128_srl_32( regs->VR_Q(v3).v, rotr ) );
+        #else
+            for (i=0; i < 4; i++)
+                regs->VR_F( v1, i ) = (regs->VR_F( v3, i ) << rotl) | (regs->VR_F( v3, i ) >> rotr);
+        #endif
         break;
     case 3:
         rotl %= 64;
         rotr = -rotl & 63;
-        for (i=0; i < 2; i++)
-            regs->VR_D( v1, i ) = (regs->VR_D( v3, i ) << rotl) | (regs->VR_D( v3, i ) >> rotr);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_or( v128_sll_64( regs->VR_Q(v3).v, rotl ), v128_srl_64( regs->VR_Q(v3).v, rotr ) );
+        #else
+            for (i=0; i < 2; i++)
+                regs->VR_D( v1, i ) = (regs->VR_D( v3, i ) << rotl) | (regs->VR_D( v3, i ) >> rotr);
+        #endif
         break;
     default:
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -1278,29 +2668,47 @@ DEF_INST( vector_element_shift_right_logical )
 
     ZVECTOR_CHECK( regs );
 
+    UNREFERENCED( i );      // maybe unreferenced
+
     shift = effective_addr2 & 0xFFF;  // Isolate number of bit positions
 
     switch (m4)
     {
     case 0:
         shift %= 8;
-        for (i=0; i < 16; i++)
-            regs->VR_B( v1, i ) = regs->VR_B( v3, i ) >> shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_srl_8( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 16; i++)
+                regs->VR_B( v1, i ) = regs->VR_B( v3, i ) >> shift;
+        #endif
         break;
     case 1:
         shift %= 16;
-        for (i=0; i < 8; i++)
-            regs->VR_H( v1, i ) = regs->VR_H( v3, i ) >> shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_srl_16( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 8; i++)
+                regs->VR_H( v1, i ) = regs->VR_H( v3, i ) >> shift;
+        #endif
         break;
     case 2:
         shift %= 32;
-        for (i=0; i < 4; i++)
-            regs->VR_F( v1, i ) = regs->VR_F( v3, i ) >> shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_srl_32( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 4; i++)
+                regs->VR_F( v1, i ) = regs->VR_F( v3, i ) >> shift;
+        #endif
         break;
     case 3:
         shift %= 64;
-        for (i=0; i < 2; i++)
-            regs->VR_D( v1, i ) = regs->VR_D( v3, i ) >> shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_srl_64( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 2; i++)
+                regs->VR_D( v1, i ) = regs->VR_D( v3, i ) >> shift;
+        #endif
         break;
     default:
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -1333,13 +2741,21 @@ DEF_INST( vector_element_shift_right_arithmetic )
         break;
     case 1:
         shift %= 16;
-        for (i=0; i < 8; i++)
-            regs->VR_H( v1, i ) = (S16) regs->VR_H( v3, i ) >> shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_sra_16( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 8; i++)
+                regs->VR_H( v1, i ) = (S16) regs->VR_H( v3, i ) >> shift;
+        #endif
         break;
     case 2:
         shift %= 32;
-        for (i=0; i < 4; i++)
-            regs->VR_F( v1, i ) = (S32) regs->VR_F( v3, i ) >> shift;
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_sra_32( regs->VR_Q(v3).v, shift );
+        #else
+            for (i=0; i < 4; i++)
+                regs->VR_F( v1, i ) = (S32) regs->VR_F( v3, i ) >> shift;
+        #endif
         break;
     case 3:
         shift %= 64;
@@ -1507,8 +2923,19 @@ DEF_INST( vector_generate_byte_mask )
 
     ZVECTOR_CHECK( regs );
 
-    for (i=0; i < 16; i++)
-        regs->VR_B(v1, i) = (i2 & (0x1 << (15 - i))) ? 0xff : 0x00;
+    #if defined ( FEATURE_V128_SSE )
+        /* remove GCC warnings and MSVC error */
+        i = 0;
+        UNREFERENCED( i );
+
+        regs->VR_Q(v1).v = v128_bit_to_byte_mask ( i2 );
+
+    #else
+
+        for (i=0; i < 16; i++)
+            regs->VR_B(v1, i) = (i2 & (0x1 << (15 - i))) ? 0xff : 0x00;
+
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -1524,26 +2951,45 @@ DEF_INST( vector_replicate_immediate )
 
     ZVECTOR_CHECK( regs );
 
+    /* remove potential warning: unused variable ‘i’ */
+    UNREFERENCED( i );
+
     if (i2 & 0x8000)
         i2 |= 0xFFFF0000;
 
     switch (m3)
     {
         case 0:
-            for (i=0; i < 16; i++)
-                regs->VR_B(v1, i) = (S8) i2;
+            #if defined( FEATURE_V128_SSE )
+                regs->VR_Q(v1).v = v128_replicate_8( (S8) i2 );
+            #else
+                for (i=0; i < 16; i++)
+                    regs->VR_B(v1, i) = (S8) i2;
+            #endif
             break;
         case 1:
-            for (i=0; i < 8; i++)
-                regs->VR_H(v1, i) = (S16) i2;
+            #if defined( FEATURE_V128_SSE )
+                regs->VR_Q(v1).v = v128_replicate_16( (S16) i2 );
+            #else
+                for (i=0; i < 8; i++)
+                    regs->VR_H(v1, i) = (S16) i2;
+            #endif
             break;
         case 2:
-            for (i=0; i < 4; i++)
-                regs->VR_F(v1, i) = (S32) i2;
+            #if defined( FEATURE_V128_SSE )
+                regs->VR_Q(v1).v = v128_replicate_32( (S32) i2 );
+            #else
+                for (i=0; i < 4; i++)
+                    regs->VR_F(v1, i) = (S32) i2;
+            #endif
             break;
         case 3:
-            for (i=0; i < 2; i++)
-                regs->VR_D(v1, i) = (S64) i2;
+            #if defined( FEATURE_V128_SSE )
+                regs->VR_Q(v1).v = v128_replicate_64( (S64) i2 );
+            #else
+                for (i=0; i < 2; i++)
+                    regs->VR_D(v1, i) = (S64) i2;
+            #endif
             break;
         default:
             ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -1654,26 +3100,46 @@ DEF_INST( vector_replicate )
 
     ZVECTOR_CHECK( regs );
 
+    /* remove potential warning: unused variable ‘i’ */
+    UNREFERENCED( i );
+
     if (i2 >= (16 >> m4))
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
 
     switch (m4)
     {
     case 0:
-        for (i=0; i < 16; i++)
-            regs->VR_B(v1, i) = regs->VR_B(v3, i2);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_8( regs->VR_B(v3, i2) );
+        #else
+            for (i=0; i < 16; i++)
+                regs->VR_B(v1, i) = regs->VR_B(v3, i2);
+        #endif
         break;
     case 1:
-        for (i=0; i < 8; i++)
-            regs->VR_H(v1, i) = regs->VR_H(v3, i2);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_16( regs->VR_H(v3, i2) );
+        #else
+            for (i=0; i < 8; i++)
+                regs->VR_H(v1, i) = regs->VR_H(v3, i2);
+        #endif
         break;
     case 2:
-        for (i=0; i < 4; i++)
-            regs->VR_F(v1, i) = regs->VR_F(v3, i2);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_32( regs->VR_F(v3, i2) );
+        #else
+            for (i=0; i < 4; i++)
+                regs->VR_F(v1, i) = regs->VR_F(v3, i2);
+        #endif
         break;
     case 3:
-        for (i=0; i < 2; i++)
-            regs->VR_D(v1, i) = regs->VR_D(v3, i2);
+        #if defined( FEATURE_V128_SSE )
+            regs->VR_Q(v1).v = v128_replicate_64( regs->VR_D(v3, i2) );
+        #else
+            for (i=0; i < 2; i++)
+                regs->VR_D(v1, i) = regs->VR_D(v3, i2);
+        #endif
+
         break;
     default:
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -1996,45 +3462,74 @@ DEF_INST( vector_isolate_string )
 
     ZVECTOR_CHECK( regs );
 
+    // printf("VISTR enter: v1=%d, v2=%d, m3=%d, m5=%d\n", v1, v2, m3,m5);
+    // u128_logmsg(" VISTR v2: ", (U128) regs->VR_Q(v2) );
+
 #define M5_CS ((m5 & 0x1) != 0)  // Condition Code Set
 
     switch (m3)
     {
     case 0:  /* Byte */
-        for (i=0; i < 16; i++)
-        {
-            if (regs->VR_B(v2, i) != 0)
+        #if defined ( FEATURE_V128_SSE )
+            i = v128_find_first_zero_in_vector_8 ( regs->VR_Q(v2).v );
+            if ( i == 16 )
             {
-                regs->VR_B(v1, i) = regs->VR_B(v2, i);
+                regs->VR_Q(v1).v = regs->VR_Q(v2).v;      /* no zero */
             }
             else
             {
                 newcc = 0;
-                for (; i < 16; i++)
-                {
-                    regs->VR_B(v1, i) = 0;
-                }
-                break;
+                regs->VR_Q(v1).v = v128_isolate_string_8( regs->VR_Q(v2).v );
             }
-        }
+        #else
+            for (i=0; i < 16; i++)
+            {
+                if (regs->VR_B(v2, i) != 0)
+                {
+                    regs->VR_B(v1, i) = regs->VR_B(v2, i);
+                }
+                else
+                {
+                    newcc = 0;
+                    for (; i < 16; i++)
+                    {
+                        regs->VR_B(v1, i) = 0;
+                    }
+                    break;
+                }
+            }
+        #endif
         break;
     case 1:  /* Halfword */
-        for (i=0; i < 8; i++)
-        {
-            if (regs->VR_H(v2, i) != 0)
+        #if defined ( FEATURE_V128_SSE )
+            i = v128_find_first_zero_in_vector_16 ( regs->VR_Q(v2).v );
+            if ( i == 8 )
             {
-                regs->VR_H(v1, i) = regs->VR_H(v2, i);
+                regs->VR_Q(v1).v = regs->VR_Q(v2).v;    /* no zero */
             }
             else
             {
                 newcc = 0;
-                for (; i < 8; i++)
-                {
-                    regs->VR_H(v1, i) = 0;
-                }
-                break;
+                regs->VR_Q(v1).v = v128_isolate_string_16( regs->VR_Q(v2).v );
             }
-        }
+        #else
+            for (i=0; i < 8; i++)
+            {
+                if (regs->VR_H(v2, i) != 0)
+                {
+                    regs->VR_H(v1, i) = regs->VR_H(v2, i);
+                }
+                else
+                {
+                    newcc = 0;
+                    for (; i < 8; i++)
+                    {
+                        regs->VR_H(v1, i) = 0;
+                    }
+                    break;
+                }
+            }
+        #endif
         break;
     case 2:  /* Word */
         for (i=0; i < 4; i++)
@@ -2064,6 +3559,9 @@ DEF_INST( vector_isolate_string )
 
 #undef M5_CS
 
+    // u128_logmsg(" VISTR v1: ", (U128) regs->VR_Q(v1) );
+    // printf("VISTR end: newcc=%d\n",newcc);
+
     ZVECTOR_END( regs );
 }
 
@@ -2081,11 +3579,17 @@ DEF_INST( vector_sign_extend_to_doubleword )
     UNREFERENCED( m4 );
     UNREFERENCED( m5 );
 
+    /* element may be unreferenced */
+    UNREFERENCED( element );
+
     ZVECTOR_CHECK( regs );
 
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_sign_extend_8_64( regs->VR_Q(v2).v );
+    #else
         element = regs->VR_B(v2, 7);
         if (element & 0x0000000000000080ull)
             element |= 0xFFFFFFFFFFFFFF00ull;
@@ -2094,8 +3598,12 @@ DEF_INST( vector_sign_extend_to_doubleword )
         if (element & 0x0000000000000080ull)
             element |= 0xFFFFFFFFFFFFFF00ull;
         regs->VR_D(v1, 1) = element;
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_sign_extend_16_64( regs->VR_Q(v2).v );
+    #else
         element = regs->VR_H(v2, 3);
         if (element & 0x0000000000008000ull)
             element |= 0xFFFFFFFFFFFF0000ull;
@@ -2104,8 +3612,12 @@ DEF_INST( vector_sign_extend_to_doubleword )
         if (element & 0x0000000000008000ull)
             element |= 0xFFFFFFFFFFFF0000ull;
         regs->VR_D(v1, 1) = element;
+    #endif
         break;
     case 2:  /* Word */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_sign_extend_32_64( regs->VR_Q(v2).v );
+    #else
         element = regs->VR_F(v2, 1);
         if (element & 0x0000000080000000ull)
             element |= 0xFFFFFFFF00000000ull;
@@ -2114,6 +3626,7 @@ DEF_INST( vector_sign_extend_to_doubleword )
         if (element & 0x0000000080000000ull)
             element |= 0xFFFFFFFF00000000ull;
         regs->VR_D(v1, 1) = element;
+    #endif
         break;
     default:
         ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
@@ -2138,42 +3651,64 @@ DEF_INST( vector_merge_low )
     UNREFERENCED( m5 );
     UNREFERENCED( m6 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( j );
+    UNREFERENCED( temp.d[0] );      /* temp maybe unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     switch (m4)
     {
     case 0:  /* Byte */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_low_8( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i=0, j=8; i<16; i+=2, j++ )
         {
             SV_B( temp, i   ) = regs->VR_B( v2, j );
             SV_B( temp, i+1 ) = regs->VR_B( v3, j );
-        }
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_low_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i=0, j=4; i<8; i+=2, j++ )
         {
             SV_H( temp, i   ) = regs->VR_H( v2, j );
             SV_H( temp, i+1 ) = regs->VR_H( v3, j );
         }
+    #endif
         break;
     case 2:  /* Word */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_low_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i=0, j=2; i<4; i+=2, j++ )
         {
             SV_F( temp, i   ) = regs->VR_F( v2, j );
             SV_F( temp, i+1 ) = regs->VR_F( v3, j );
         }
+    #endif
         break;
     case 3:  /* Doubleword */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_low_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         SV_D( temp, 0 ) = regs->VR_D( v2, 1 );
         SV_D( temp, 1 ) = regs->VR_D( v3, 1 );
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
         break;
     }
 
-    regs->VR_D( v1, 0 ) = SV_D( temp, 0 );
-    regs->VR_D( v1, 1 ) = SV_D( temp, 1 );
+    #if !defined ( FEATURE_V128_SSE )
+        regs->VR_D( v1, 0 ) = SV_D( temp, 0 );
+        regs->VR_D( v1, 1 ) = SV_D( temp, 1 );
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2193,42 +3728,65 @@ DEF_INST( vector_merge_high )
     UNREFERENCED( m5 );
     UNREFERENCED( m6 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( j );
+    UNREFERENCED( temp.d[0] );  /* temp may be unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     switch (m4)
     {
     case 0:  /* Byte */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_high_8( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i=0, j=0; i<16; i+=2, j++ )
         {
             SV_B( temp, i   ) = regs->VR_B( v2, j );
             SV_B( temp, i+1 ) = regs->VR_B( v3, j );
         }
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_high_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i=0, j=0; i<8; i+=2, j++ )
         {
             SV_H( temp, i   ) = regs->VR_H( v2, j );
             SV_H( temp, i+1 ) = regs->VR_H( v3, j );
         }
+    #endif
         break;
     case 2:  /* Word */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_high_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i=0, j=0; i<4; i+=2, j++ )
         {
             SV_F( temp, i   ) = regs->VR_F( v2, j );
             SV_F( temp, i+1 ) = regs->VR_F( v3, j );
         }
+    #endif
         break;
     case 3:  /* Doubleword */
+    #if defined ( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_merge_high_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
         SV_D( temp, 1 ) = regs->VR_D( v3, 0 );
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
         break;
     }
 
-    regs->VR_D( v1, 0 ) = SV_D( temp, 0 );
-    regs->VR_D( v1, 1 ) = SV_D( temp, 1 );
+    #if !defined ( FEATURE_V128_SSE )
+        regs->VR_D( v1, 0 ) = SV_D( temp, 0 );
+        regs->VR_D( v1, 1 ) = SV_D( temp, 1 );
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2462,8 +4020,12 @@ DEF_INST( vector_and )
 
     ZVECTOR_CHECK( regs );
 
-    regs->VR_D(v1, 0) = regs->VR_D(v2, 0) & regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = regs->VR_D(v2, 1) & regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_and( regs->VR_Q(v2).v, regs->VR_Q(v3).v  );
+    #else
+        regs->VR_D(v1, 0) = regs->VR_D(v2, 0) & regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = regs->VR_D(v2, 1) & regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2484,8 +4046,12 @@ DEF_INST( vector_and_with_complement )
 
     ZVECTOR_CHECK( regs );
 
-    regs->VR_D(v1, 0) = regs->VR_D(v2, 0) & ~regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = regs->VR_D(v2, 1) & ~regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_andnot( regs->VR_Q(v2).v, regs->VR_Q(v3).v  );
+    #else
+        regs->VR_D(v1, 0) = regs->VR_D(v2, 0) & ~regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = regs->VR_D(v2, 1) & ~regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2506,8 +4072,12 @@ DEF_INST( vector_or )
 
     ZVECTOR_CHECK( regs );
 
-    regs->VR_D(v1, 0) = regs->VR_D(v2, 0) | regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = regs->VR_D(v2, 1) | regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_or( regs->VR_Q(v2).v, regs->VR_Q(v3).v  );
+    #else
+        regs->VR_D(v1, 0) = regs->VR_D(v2, 0) | regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = regs->VR_D(v2, 1) | regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2528,8 +4098,12 @@ DEF_INST( vector_nor )
 
     ZVECTOR_CHECK( regs );
 
-    regs->VR_D(v1, 0) = ~regs->VR_D(v2, 0) & ~regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = ~regs->VR_D(v2, 1) & ~regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_andnot( v128_not( regs->VR_Q(v2).v ) , regs->VR_Q(v3).v  );
+    #else
+        regs->VR_D(v1, 0) = ~regs->VR_D(v2, 0) & ~regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = ~regs->VR_D(v2, 1) & ~regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2550,9 +4124,12 @@ DEF_INST( vector_not_exclusive_or )
     UNREFERENCED( m6 );
 
     ZVECTOR_CHECK( regs );
-
-    regs->VR_D(v1, 0) = ~(regs->VR_D(v2, 0) ^ regs->VR_D(v3, 0));
-    regs->VR_D(v1, 1) = ~(regs->VR_D(v2, 1) ^ regs->VR_D(v3, 1));
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_xor( v128_not( regs->VR_Q(v2).v ) , v128_not( regs->VR_Q(v3).v )  );
+    #else
+        regs->VR_D(v1, 0) = ~(regs->VR_D(v2, 0) ^ regs->VR_D(v3, 0));
+        regs->VR_D(v1, 1) = ~(regs->VR_D(v2, 1) ^ regs->VR_D(v3, 1));
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2574,8 +4151,12 @@ DEF_INST( vector_exclusive_or )
 
     ZVECTOR_CHECK( regs );
 
-    regs->VR_D(v1, 0) = regs->VR_D(v2, 0) ^ regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = regs->VR_D(v2, 1) ^ regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_xor( regs->VR_Q(v2).v, regs->VR_Q(v3).v  );
+    #else
+        regs->VR_D(v1, 0) = regs->VR_D(v2, 0) ^ regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = regs->VR_D(v2, 1) ^ regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2596,9 +4177,12 @@ DEF_INST( vector_nand )
     UNREFERENCED( m6 );
 
     ZVECTOR_CHECK( regs );
-
-    regs->VR_D(v1, 0) = ~regs->VR_D(v2, 0) | ~regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = ~regs->VR_D(v2, 1) | ~regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_or( v128_not( regs->VR_Q(v2).v ), v128_not( regs->VR_Q(v3).v )  );
+    #else
+        regs->VR_D(v1, 0) = ~regs->VR_D(v2, 0) | ~regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = ~regs->VR_D(v2, 1) | ~regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2620,9 +4204,12 @@ DEF_INST( vector_or_with_complement )
     UNREFERENCED( m6 );
 
     ZVECTOR_CHECK( regs );
-
-    regs->VR_D(v1, 0) = regs->VR_D(v2, 0) | ~regs->VR_D(v3, 0);
-    regs->VR_D(v1, 1) = regs->VR_D(v2, 1) | ~regs->VR_D(v3, 1);
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_or( regs->VR_Q(v2).v, v128_not( regs->VR_Q(v3).v )  );
+    #else
+        regs->VR_D(v1, 0) = regs->VR_D(v2, 0) | ~regs->VR_D(v3, 0);
+        regs->VR_D(v1, 1) = regs->VR_D(v2, 1) | ~regs->VR_D(v3, 1);
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2841,15 +4428,24 @@ DEF_INST( vector_shift_left_by_byte )
 
     ZVECTOR_CHECK( regs );
 
-    SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
-    SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
-    SV_D( temp, 2 ) = 0;
-    SV_D( temp, 3 ) = 0;
-
     j = (regs->VR_B( v3, 7 ) & 0x78) >> 3;
 
-    for (i = 0; i < 16; i++, j++)
-        regs->VR_B(v1, i) = SV_B( temp, j );
+    #if defined ( FEATURE_V128_SSE )
+        UNREFERENCED( i );
+        UNREFERENCED( temp.d[0] );
+
+        regs->VR_Q(v1).v = v128_shift_left_byte( regs->VR_Q(v2).v, j );
+
+    #else
+        SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
+        SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
+        SV_D( temp, 2 ) = 0;
+        SV_D( temp, 3 ) = 0;
+
+        for (i = 0; i < 16; i++, j++)
+            regs->VR_B(v1, i) = SV_B( temp, j );
+
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -2870,15 +4466,25 @@ DEF_INST( vector_shift_left_double_by_byte )
 
     ZVECTOR_CHECK( regs );
 
-    SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
-    SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
-    SV_D( temp, 2 ) = regs->VR_D( v3, 0 );
-    SV_D( temp, 3 ) = regs->VR_D( v3, 1 );
+    #if defined ( FEATURE_V128_SSE )
+        UNREFERENCED( i );
+        UNREFERENCED( j );
+        UNREFERENCED( temp.d[0] );
 
-    for (i = 0, j = i4; i < 16; i++, j++)
-        regs->VR_B(v1, i) = SV_B( temp, j );
+        regs->VR_Q(v1).v = v128_shift_left_double_byte( regs->VR_Q(v2).v, regs->VR_Q(v3).v, i4 );
 
-    ZVECTOR_END( regs );
+    #else
+        SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
+        SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
+        SV_D( temp, 2 ) = regs->VR_D( v3, 0 );
+        SV_D( temp, 3 ) = regs->VR_D( v3, 1 );
+
+        for (i = 0, j = i4; i < 16; i++, j++)
+            regs->VR_B(v1, i) = SV_B( temp, j );
+
+    #endif
+
+        ZVECTOR_END( regs );
 }
 
 /*-------------------------------------------------------------------*/
@@ -3039,15 +4645,24 @@ DEF_INST( vector_shift_right_logical_by_byte )
 
     ZVECTOR_CHECK( regs );
 
-    SV_D( temp, 0 ) = 0;
-    SV_D( temp, 1 ) = 0;
-    SV_D( temp, 2 ) = regs->VR_D( v2, 0 );
-    SV_D( temp, 3 ) = regs->VR_D( v2, 1 );
-
     j = 16 - ((regs->VR_B( v3, 7 ) & 0x78) >> 3);
 
-    for (i = 0; i < 16; i++, j++)
-        regs->VR_B(v1, i) = SV_B( temp, j );
+    #if defined ( FEATURE_V128_SSE )
+        UNREFERENCED( i );
+        UNREFERENCED( temp.d[0] );
+
+        regs->VR_Q(v1).v = v128_shift_right_logical_byte( regs->VR_Q(v2).v, j );
+
+    #else
+        SV_D( temp, 0 ) = 0;
+        SV_D( temp, 1 ) = 0;
+        SV_D( temp, 2 ) = regs->VR_D( v2, 0 );
+        SV_D( temp, 3 ) = regs->VR_D( v2, 1 );
+
+        for (i = 0; i < 16; i++, j++)
+            regs->VR_B(v1, i) = SV_B( temp, j );
+
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -3102,23 +4717,31 @@ DEF_INST( vector_shift_right_arithmetic_by_byte )
 
     ZVECTOR_CHECK( regs );
 
-    if (regs->VR_B( v2, 0 ) & 0x80)
-    {
-        SV_D( temp, 0 ) = 0xFFFFFFFFFFFFFFFFull;
-        SV_D( temp, 1 ) = 0xFFFFFFFFFFFFFFFFull;
-    }
-    else
-    {
-        SV_D( temp, 0 ) = 0;
-        SV_D( temp, 1 ) = 0;
-    }
-    SV_D( temp, 2 ) = regs->VR_D( v2, 0 );
-    SV_D( temp, 3 ) = regs->VR_D( v2, 1 );
-
     j = 16 - ((regs->VR_B( v3, 7 ) & 0x78) >> 3);
 
-    for (i = 0; i < 16; i++, j++)
-        regs->VR_B(v1, i) = SV_B( temp, j );
+    #if defined ( FEATURE_V128_SSE )
+        UNREFERENCED( i );
+        UNREFERENCED( temp.d[0] );
+
+        regs->VR_Q(v1).v = v128_shift_right_arithmetic_byte( regs->VR_Q(v2).v, j );
+
+    #else
+        if (regs->VR_B( v2, 0 ) & 0x80)
+        {
+            SV_D( temp, 0 ) = 0xFFFFFFFFFFFFFFFFull;
+            SV_D( temp, 1 ) = 0xFFFFFFFFFFFFFFFFull;
+        }
+        else
+        {
+            SV_D( temp, 0 ) = 0;
+            SV_D( temp, 1 ) = 0;
+        }
+        SV_D( temp, 2 ) = regs->VR_D( v2, 0 );
+        SV_D( temp, 3 ) = regs->VR_D( v2, 1 );
+
+        for (i = 0; i < 16; i++, j++)
+            regs->VR_B(v1, i) = SV_B( temp, j );
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -3149,50 +4772,70 @@ DEF_INST( vector_find_element_equal )
     switch (m4)
     {
     case 0:  /* Byte */
-        for (i=0; i<16; i++)
-        {
-            if (regs->VR_B(v2,i) == regs->VR_B(v3,i))
+        #if defined ( FEATURE_V128_SSE )
+            ei = v128_find_first_equal_8 ( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+            if (ei != 16) ef = TRUE;
+            if (M5_ZS)
             {
-                ef = TRUE;
-                ei = i;     // Element index in bytes
-                break;
+                zi = v128_find_first_zero_in_vector_8 ( regs->VR_Q(v2).v );
+                if (zi != 16) zf = TRUE;
             }
-        }
-        if (M5_ZS)
-        {
+        #else
             for (i=0; i<16; i++)
             {
-                if (regs->VR_B(v2,i) == 0)
+                if (regs->VR_B(v2,i) == regs->VR_B(v3,i))
                 {
-                    zf = TRUE;
-                    zi = i;      // Zero element index in bytes
+                    ef = TRUE;
+                    ei = i;     // Element index in bytes
                     break;
                 }
             }
-        }
+            if (M5_ZS)
+            {
+                for (i=0; i<16; i++)
+                {
+                    if (regs->VR_B(v2,i) == 0)
+                    {
+                        zf = TRUE;
+                        zi = i;      // Zero element index in bytes
+                        break;
+                    }
+                }
+            }
+        #endif
         break;
     case 1:  /* Halfword */
-        for (i=0; i<8; i++)
-        {
-            if (regs->VR_H(v2,i) == regs->VR_H(v3,i))
+        #if defined ( FEATURE_V128_SSE )
+            ei = 2 * v128_find_first_equal_16 ( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+            if (ei != 16) ef = TRUE;
+            if (M5_ZS)
             {
-                ef = TRUE;
-                ei = i * 2;  // Element index in bytes
-                break;
+                zi = 2 * v128_find_first_zero_in_vector_16 ( regs->VR_Q(v2).v );
+                if (zi != 16)  zf = TRUE;
             }
-        }
-        if (M5_ZS)
-        {
+        #else
             for (i=0; i<8; i++)
             {
-                if (regs->VR_H(v2,i) == 0)
+                if (regs->VR_H(v2,i) == regs->VR_H(v3,i))
                 {
-                    zf = TRUE;
-                    zi = i * 2;  // Zero element index in bytes
+                    ef = TRUE;
+                    ei = i * 2;  // Element index in bytes
                     break;
                 }
             }
-        }
+            if (M5_ZS)
+            {
+                for (i=0; i<8; i++)
+                {
+                    if (regs->VR_H(v2,i) == 0)
+                    {
+                        zf = TRUE;
+                        zi = i * 2;  // Zero element index in bytes
+                        break;
+                    }
+                }
+            }
+        #endif
         break;
     case 2:  /* Word */
         for (i=0; i<4; i++)
@@ -3291,52 +4934,95 @@ DEF_INST( vector_find_element_not_equal )
     switch (m4)
     {
     case 0:  /* Byte */
-        for (i=0; i<16; i++)
-        {
-            if (regs->VR_B(v2,i) != regs->VR_B(v3,i))
+        #if defined ( FEATURE_V128_SSE )
+            nei = v128_find_first_not_equal_8 ( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+            if (nei != 16)
             {
                 nef = TRUE;
-                nei = i;     // Element index in bytes
-                newcc = (regs->VR_B(v2,i) < regs->VR_B(v3,i)) ? 1 : 2;
-                break;
+                newcc = (regs->VR_B(v2, nei) < regs->VR_B(v3, nei)) ? 1 : 2;
             }
-        }
-        if (M5_ZS)
-        {
+            if (M5_ZS)
+            {
+                zi = v128_find_first_zero_in_vector_8 ( regs->VR_Q(v2).v );
+                if (zi != 16) zf = TRUE;
+            }
+
+            // u128_logmsg(" VFENE byte v2: ", (U128) regs->VR_Q(v2) );
+            // u128_logmsg(" VFENE byte v3: ", (U128) regs->VR_Q(v3) );
+            // printf(" VFENE byte: nei=%d, nef=%d, zi=%d, zf=%d\n", nei, nef, zi, zf);
+
+        #else
             for (i=0; i<16; i++)
             {
-                if (regs->VR_B(v2,i) == 0)
+                if (regs->VR_B(v2,i) != regs->VR_B(v3,i))
                 {
-                    zf = TRUE;
-                    zi = i;      // Zero element index in bytes
+                    nef = TRUE;
+                    nei = i;     // Element index in bytes
+                    newcc = (regs->VR_B(v2,i) < regs->VR_B(v3,i)) ? 1 : 2;
                     break;
                 }
             }
-        }
+            if (M5_ZS)
+            {
+                for (i=0; i<16; i++)
+                {
+                    if (regs->VR_B(v2,i) == 0)
+                    {
+                        zf = TRUE;
+                        zi = i;      // Zero element index in bytes
+                        break;
+                    }
+                }
+            }
+        #endif
         break;
     case 1:  /* Halfword */
-        for (i=0; i<8; i++)
-        {
-            if (regs->VR_H(v2,i) != regs->VR_H(v3,i))
+        #if defined ( FEATURE_V128_SSE )
+            nei = v128_find_first_not_equal_16 ( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+            if (nei != 8)
             {
                 nef = TRUE;
-                nei = i * 2;  // Element index in bytes
-                newcc = (regs->VR_H(v2,i) < regs->VR_H(v3,i)) ? 1 : 2;
-                break;
+                newcc = (regs->VR_H(v2, nei) < regs->VR_H(v3, nei)) ? 1 : 2;
             }
-        }
-        if (M5_ZS)
-        {
+            nei = nei * 2;  // Element index in bytes
+            if (M5_ZS)
+            {
+                zi = v128_find_first_zero_in_vector_16 ( regs->VR_Q(v2).v );
+                if (zi != 8)
+                {
+                     zf = TRUE;
+                }
+                zi = zi * 2;  // Zero element index in bytes
+            }
+
+            // u128_logmsg(" VFENE hw v2: ", (U128) regs->VR_Q(v2) );
+            // u128_logmsg(" VFENE hw v3: ", (U128) regs->VR_Q(v3) );
+            // printf(" VFENE hw: nei=%d, nef=%d, zi=%d, zf=%d\n", nei, nef, zi, zf);
+
+        #else
             for (i=0; i<8; i++)
             {
-                if (regs->VR_H(v2,i) == 0)
+                if (regs->VR_H(v2,i) != regs->VR_H(v3,i))
                 {
-                    zf = TRUE;
-                    zi = i * 2;  // Zero element index in bytes
+                    nef = TRUE;
+                    nei = i * 2;  // Element index in bytes
+                    newcc = (regs->VR_H(v2,i) < regs->VR_H(v3,i)) ? 1 : 2;
                     break;
                 }
             }
-        }
+            if (M5_ZS)
+            {
+                for (i=0; i<8; i++)
+                {
+                    if (regs->VR_H(v2,i) == 0)
+                    {
+                        zf = TRUE;
+                        zi = i * 2;  // Zero element index in bytes
+                        break;
+                    }
+                }
+            }
+        #endif
         break;
     case 2:  /* Word */
         for (i=0; i<4; i++)
@@ -3428,6 +5114,142 @@ Sent to IBM, they will reformulate the sentence.
 
 salva - 2023, feb,27.
 */
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* Intrinsic version of                                              */
+/* E782 VFAE   - Vector Find Any Element Equal               [VRR-b] */
+/* ================================================================= */
+
+DEF_INST( vector_find_any_element_equal )
+{
+
+    int     v1, v2, v3, m4, m5;
+    int     lxt1, lxt2;                // Lowest indexed true
+    int     mxt;                       // Maximum indexed true
+    QW      irt1, irt2;                // First and second intermediate results
+
+    VRR_B( inst, regs, v1, v2, v3, m4, m5 );
+
+    ZVECTOR_CHECK( regs );
+
+#define M5_IN ((m5 & 0x8) != 0) // Invert Result
+#define M5_RT ((m5 & 0x4) != 0) // Result Type
+#define M5_ZS ((m5 & 0x2) != 0) // Zero Search
+#define M5_CS ((m5 & 0x1) != 0) // Condition Code Set
+
+    irt1.v = v128_zero();
+    irt2.v = v128_zero();
+
+    switch (m4)
+    {
+    case 0:  // Byte
+        // Compare the element of the second with the elements of the third operands
+        irt1.v = v128_find_any_equal_8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        if (M5_IN) irt1.v = v128_not( irt1.v );
+        if (M5_ZS) irt2.v = v128_find_equal_8( regs->VR_Q(v2).v, v128_zero() );
+        if (M5_RT)                     // if M5_RT (Result Type)
+        {
+            regs->VR_Q(v1) = irt1;
+        }
+        else                           // else !M5_RT
+        {
+            lxt1 = v128_find_first_in_vector_8 ( irt1.v, 0xFF);
+            lxt2 = v128_find_first_in_vector_8 ( irt2.v, 0xFF);
+
+            regs->VR_D(v1, 0) = min(lxt1, lxt2);
+            regs->VR_D(v1, 1) = 0;
+        }
+        break;
+    case 1:  // Halfword
+        // Compare the element of the second with the elements of the third operands
+        irt1.v = v128_find_any_equal_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        if (M5_IN) irt1.v = v128_not( irt1.v );
+        if (M5_ZS) irt2.v = v128_find_equal_16( regs->VR_Q(v2).v, v128_zero() );
+        if (M5_RT)                     // if M5_RT (Result Type)
+        {
+            regs->VR_Q(v1) = irt1;
+        }
+        else                           // else !M5_RT
+        {
+            lxt1 = 2 * v128_find_first_in_vector_16 ( irt1.v, 0xFFFF);
+            lxt2 = 2 * v128_find_first_in_vector_16 ( irt2.v, 0xFFFF);
+
+            regs->VR_D(v1, 0) = min(lxt1, lxt2);
+            regs->VR_D(v1, 1) = 0;
+        }
+        break;
+    case 2:  // Word
+        // Compare the element of the second with the elements of the third operands
+        irt1.v = v128_find_any_equal_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        if (M5_IN) irt1.v = v128_not( irt1.v );
+        if (M5_ZS) irt2.v = v128_find_equal_32( regs->VR_Q(v2).v, v128_zero() );
+        if (M5_RT)                     // if M5_RT (Result Type)
+        {
+            regs->VR_Q(v1) = irt1;
+        }
+        else                           // else !M5_RT
+        {
+            lxt1 = 4 * v128_find_first_in_vector_32 ( irt1.v, 0xFFFFFFFF);
+            lxt2 = 4 * v128_find_first_in_vector_32 ( irt2.v, 0xFFFFFFFF);
+
+            regs->VR_D(v1, 0) = min(lxt1, lxt2);
+            regs->VR_D(v1, 1) = 0;
+        }
+        break;
+    default:
+        ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
+        break;
+    }
+
+    if (M5_CS)                         // if M5_CS (Condition Code Set)
+    {
+        switch (m4)
+        {
+        case 0:  // Byte
+            lxt2 = mxt = 16;
+            lxt1 = v128_find_first_in_vector_8 ( irt1.v, 0xFF);
+            if (M5_ZS) lxt2 = v128_find_first_in_vector_8 ( irt2.v, 0xFF);
+            break;
+        case 1:  // Halfword
+            lxt2 = mxt = 8;
+            lxt1 = v128_find_first_in_vector_16 ( irt1.v, 0xFFFF);
+            if (M5_ZS)  lxt2 = v128_find_first_in_vector_16 ( irt2.v, 0xFFFF);
+            break;
+        case 2:  // Word
+            lxt2 = mxt = 4;
+            lxt1 = v128_find_first_in_vector_32 ( irt1.v, 0xFFFFFFFF);
+            if (M5_ZS)  lxt2 = v128_find_first_in_vector_32 ( irt2.v, 0xFFFFFFFF);
+            break;
+        default:  // Prevent erroneous "may be used uninitialized" warnings
+            lxt1 = lxt2 = mxt = 0;
+            break;
+        }
+
+        // cc 1 and 3 are possible when M5_ZS is 0 or 1.
+        if (lxt1 == mxt && lxt2 == mxt)
+            regs->psw.cc = 3;
+        else if (lxt1 < mxt && lxt2 == mxt )
+            regs->psw.cc = 1;
+        // cc 0 and 2 are only possible when M5_ZS is 1.
+        else if (lxt1 < lxt2)
+            regs->psw.cc = 2;
+        else
+            regs->psw.cc = 0;
+    }
+
+#undef M5_IN
+#undef M5_RT
+#undef M5_ZS
+#undef M5_CS
+
+    ZVECTOR_END( regs );
+}
+
+#else
+/* ================================================================= */
+/* Portable C of                                                     */
+/* E782 VFAE   - Vector Find Any Element Equal               [VRR-b] */
+/* ================================================================= */
 
 DEF_INST( vector_find_any_element_equal )
 {
@@ -3621,6 +5443,7 @@ DEF_INST( vector_find_any_element_equal )
 
     ZVECTOR_END( regs );
 }
+#endif
 
 /*-------------------------------------------------------------------*/
 /* E784 VPDI   - Vector Permute Doubleword Immediate         [VRR-c] */
@@ -3673,36 +5496,44 @@ DEF_INST( vector_bit_permute )
 
     ZVECTOR_CHECK( regs );
 
-    SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
-    SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
-    SV_D( temp, 2 ) = 0;
-    SV_D( temp, 3 ) = 0;
+    #if defined ( FEATURE_V128_SSE )
+        UNREFERENCED( i & j & k & wanted);
+        UNREFERENCED( temp.d[0] );
 
-    // Each of the sixteen 1-byte elements in vector register v3
-    // contains the bit number (0 to 255) of a bit in the source
-    // vector.
-    // 1. Calculate the number of the byte (0 to 31) in the source
-    //    vector that contains the wanted bit number.
-    // 2. Calculate the number of the bit (0 to 7) in the byte
-    //    that is the wanted bit.
-    // 3. Calculate the value (0 or 1) of the wanted bit, and
-    // 4. If the wanted bit has a value of 1, place the bit in
-    //    the result.
-    // The bit value of the bit number in the first element of v3
-    // becomes result bit 0, the bit value of the bit number in the
-    // second element of v3 becomes result bit 1, and so on until
-    // the bit value of the bit number in the sixteenth element of
-    // v3 becomes result bit 15.
-    for (i = 0; i < 16; i++)
-    {
-        j = regs->VR_B( v3, i ) / 8;
-        k = regs->VR_B( v3, i ) % 8;
-        wanted = SV_B( temp, j ) & ( 0x80 >> k );
-        if (wanted)
+        result = v128_bit_permute( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+
+    #else
+        SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
+        SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
+        SV_D( temp, 2 ) = 0;
+        SV_D( temp, 3 ) = 0;
+
+        // Each of the sixteen 1-byte elements in vector register v3
+        // contains the bit number (0 to 255) of a bit in the source
+        // vector.
+        // 1. Calculate the number of the byte (0 to 31) in the source
+        //    vector that contains the wanted bit number.
+        // 2. Calculate the number of the bit (0 to 7) in the byte
+        //    that is the wanted bit.
+        // 3. Calculate the value (0 or 1) of the wanted bit, and
+        // 4. If the wanted bit has a value of 1, place the bit in
+        //    the result.
+        // The bit value of the bit number in the first element of v3
+        // becomes result bit 0, the bit value of the bit number in the
+        // second element of v3 becomes result bit 1, and so on until
+        // the bit value of the bit number in the sixteenth element of
+        // v3 becomes result bit 15.
+        for (i = 0; i < 16; i++)
         {
-            result |= ( 0x0001 << ( 15 - i ) );
+            j = regs->VR_B( v3, i ) / 8;
+            k = regs->VR_B( v3, i ) % 8;
+            wanted = SV_B( temp, j ) & ( 0x80 >> k );
+            if (wanted)
+            {
+                result |= ( 0x0001 << ( 15 - i ) );
+            }
         }
-    }
+#endif
 
     regs->VR_D( v1, 0 ) = result;
     regs->VR_D( v1, 1 ) = 0;
@@ -4230,15 +6061,24 @@ DEF_INST( vector_permute )
 
     ZVECTOR_CHECK( regs );
 
-    SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
-    SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
-    SV_D( temp, 2 ) = regs->VR_D( v3, 0 );
-    SV_D( temp, 3 ) = regs->VR_D( v3, 1 );
+    #if defined ( FEATURE_V128_SSE )
+        UNREFERENCED( i );
+        UNREFERENCED( j );
+        UNREFERENCED( temp.d[0] );
 
-    for (i = 0; i < 16; i++) {
-        j = regs->VR_B(v4, i) & 0x1f;
-        regs->VR_B(v1, i) = SV_B( temp, j );
-    }
+        regs->VR_Q(v1).v = v128_permute( regs->VR_Q(v2).v, regs->VR_Q(v3).v, regs->VR_Q(v4).v  );
+
+    #else
+        SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
+        SV_D( temp, 1 ) = regs->VR_D( v2, 1 );
+        SV_D( temp, 2 ) = regs->VR_D( v3, 0 );
+        SV_D( temp, 3 ) = regs->VR_D( v3, 1 );
+
+        for (i = 0; i < 16; i++) {
+            j = regs->VR_B(v4, i) & 0x1f;
+            regs->VR_B(v1, i) = SV_B( temp, j );
+        }
+    #endif
 
     ZVECTOR_END( regs );
 }
@@ -4279,6 +6119,10 @@ DEF_INST( vector_pack )
     UNREFERENCED( m5 );
     UNREFERENCED( m6 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( temp.d[0] );      /* temp maybe unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     SV_D( temp, 0 ) = regs->VR_D( v2, 0 );
@@ -4289,23 +6133,38 @@ DEF_INST( vector_pack )
     switch (m4)
     {
     case 1:  /* Halfword: Low-order bytes from halfwords */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_pack_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i = 0; i < 16; i++ )
         {
             regs->VR_B( v1, i ) = SV_B( temp, (i*2)+1 );
         }
+    #endif
         break;
+
     case 2:  /* Word: Low-order halfwords from words */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_pack_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i = 0; i < 8; i++ )
         {
             regs->VR_H( v1, i ) = SV_H( temp, (i*2)+1 );
         }
+    #endif
         break;
+
     case 3:  /* Doubleword: Low-order words from doublewords */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_pack_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v );
+    #else
         for ( i = 0; i < 4; i++ )
         {
             regs->VR_F( v1, i ) = SV_F( temp, (i*2)+1 );
         }
+    #endif
         break;
+
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
         break;
@@ -4314,6 +6173,51 @@ DEF_INST( vector_pack )
     ZVECTOR_END( regs );
 }
 
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* Intrinsic version of                                              */
+/*-------------------------------------------------------------------*/
+/* E795 VPKLS  - Vector Pack Logical Saturate                [VRR-b] */
+/*-------------------------------------------------------------------*/
+DEF_INST(vector_pack_logical_saturate)
+{
+int     v1, v2, v3, m4, m5;
+
+VRR_B( inst, regs, v1, v2, v3, m4, m5 );
+
+ZVECTOR_CHECK( regs );
+
+#define M5_CS ((m5 & 0x1) != 0)  // Condition Code Set
+
+switch (m4)
+{
+case 1:  /* Halfword: Low-order bytes from halfwords */
+    regs->VR_Q(v1).v = v128_pack_logical_saturate_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    if (M5_CS)  regs->psw.cc = v128_pack_logical_saturate_cc_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    break;
+
+case 2:  /* Word: Low-order halfwords from words */
+    regs->VR_Q(v1).v = v128_pack_logical_saturate_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    if (M5_CS)  regs->psw.cc = v128_pack_logical_saturate_cc_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    break;
+
+case 3:  /* Doubleword: Low-order words from doublewords */
+    regs->VR_Q(v1).v = v128_pack_logical_saturate_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    if (M5_CS)  regs->psw.cc = v128_pack_logical_saturate_cc_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    break;
+
+default:
+    ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+    break;
+}
+
+#undef M5_CS
+
+    ZVECTOR_END( regs );
+}
+#else
+/* ================================================================= */
+/* Portable C of                                                     */
 /*-------------------------------------------------------------------*/
 /* E795 VPKLS  - Vector Pack Logical Saturate                [VRR-b] */
 /*-------------------------------------------------------------------*/
@@ -4410,7 +6314,54 @@ DEF_INST(vector_pack_logical_saturate)
 
     ZVECTOR_END( regs );
 }
+#endif
 
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* Intrinsic version of                                              */
+/*-------------------------------------------------------------------*/
+/* E797 VPKS   - Vector Pack Saturate                        [VRR-b] */
+/*-------------------------------------------------------------------*/
+DEF_INST( vector_pack_saturate )
+{
+    int     v1, v2, v3, m4, m5;
+
+    VRR_B( inst, regs, v1, v2, v3, m4, m5 );
+
+    ZVECTOR_CHECK( regs );
+
+#define M5_CS ((m5 & 0x1) != 0)  // Condition Code Set
+
+    switch (m4)
+    {
+    case 1:  /* Halfword: Low-order bytes from halfwords */
+        regs->VR_Q(v1).v = v128_pack_saturate_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        if (M5_CS)  regs->psw.cc = v128_pack_saturate_cc_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 2:  /* Word: Low-order halfwords from words */
+        regs->VR_Q(v1).v = v128_pack_saturate_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        if (M5_CS)  regs->psw.cc = v128_pack_saturate_cc_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 3:  /* Doubleword: Low-order words from doublewords */
+        regs->VR_Q(v1).v = v128_pack_saturate_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        if (M5_CS)  regs->psw.cc = v128_pack_saturate_cc_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    default:
+        ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+        break;
+    }
+
+#undef M5_CS
+
+    ZVECTOR_END( regs );
+}
+
+#else
+/* ================================================================= */
+/* Portable C of                                                     */
 /*-------------------------------------------------------------------*/
 /* E797 VPKS   - Vector Pack Saturate                        [VRR-b] */
 /*-------------------------------------------------------------------*/
@@ -4552,6 +6503,7 @@ DEF_INST( vector_pack_saturate )
 
     ZVECTOR_END( regs );
 }
+#endif
 
 /*-------------------------------------------------------------------*/
 /* E7A1 VMLH   - Vector Multiply Logical High                [VRR-c] */
@@ -5646,27 +7598,43 @@ DEF_INST( vector_unpack_logical_low )
     UNREFERENCED( m4 );
     UNREFERENCED( m5 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( temp.d[0] );      /* temp maybe unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_logical_low_8( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 8; i++)
             temp.h[i] = (U16) regs->VR_B(v2, i + 8);
         for (i = 0; i < 8; i++)
             regs->VR_H(v1, i) = temp.h[i];
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_logical_low_16( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 4; i++)
             temp.f[i] = (U32) regs->VR_H(v2, i + 4);
         for (i = 0; i < 4; i++)
             regs->VR_F(v1, i) = temp.f[i];
+    #endif
         break;
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_logical_low_32( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 2; i++)
             temp.d[i] = (U64) regs->VR_F(v2, i + 2);
         for (i = 0; i < 2; i++)
             regs->VR_D(v1, i) = temp.d[i];
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
@@ -5690,27 +7658,43 @@ DEF_INST( vector_unpack_logical_high )
     UNREFERENCED( m4 );
     UNREFERENCED( m5 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( temp.d[0] );      /* temp maybe unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_logical_high_8( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 8; i++)
             temp.h[i] = (U16) regs->VR_B(v2, i);
         for (i = 0; i < 8; i++)
             regs->VR_H(v1, i) = temp.h[i];
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_logical_high_16( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 4; i++)
             temp.f[i] = (U32) regs->VR_H(v2, i);
         for (i = 0; i < 4; i++)
             regs->VR_F(v1, i) = temp.f[i];
+    #endif
         break;
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_logical_high_32( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 2; i++)
             temp.d[i] = (U64) regs->VR_F(v2, i);
         for (i = 0; i < 2; i++)
             regs->VR_D(v1, i) = temp.d[i];
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
@@ -5735,11 +7719,18 @@ DEF_INST( vector_unpack_low )
     UNREFERENCED( m4 );
     UNREFERENCED( m5 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( temp.sd[0] );      /* temp maybe unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_low_8( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 8; i++)
         {
             temp.sh[i] = regs->VR_B(v2, i + 8);
@@ -5747,8 +7738,12 @@ DEF_INST( vector_unpack_low )
         }
         for (i = 0; i < 8; i++)
             regs->VR_H(v1, i) = temp.sh[i];
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_low_16( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 4; i++)
         {
             temp.sf[i] = regs->VR_H(v2, i + 4);
@@ -5756,8 +7751,12 @@ DEF_INST( vector_unpack_low )
         }
         for (i = 0; i < 4; i++)
             regs->VR_F(v1, i) = temp.sf[i];
+    #endif
         break;
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_low_32( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 2; i++)
         {
             temp.sd[i] = regs->VR_F(v2, i + 2);
@@ -5765,6 +7764,7 @@ DEF_INST( vector_unpack_low )
         }
         for (i = 0; i < 2; i++)
             regs->VR_D(v1, i) = temp.sd[i];
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
@@ -5789,11 +7789,18 @@ DEF_INST( vector_unpack_high )
     UNREFERENCED( m4 );
     UNREFERENCED( m5 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+    UNREFERENCED( temp.sd[0] );      /* temp maybe unreferenced */
+
     ZVECTOR_CHECK( regs );
 
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_high_8( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 8; i++)
         {
             temp.sh[i] = regs->VR_B(v2, i);
@@ -5801,8 +7808,12 @@ DEF_INST( vector_unpack_high )
         }
         for (i = 0; i < 8; i++)
             regs->VR_H(v1, i) = temp.sh[i];
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_high_16( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 4; i++)
         {
             temp.sf[i] = regs->VR_H(v2, i);
@@ -5810,8 +7821,12 @@ DEF_INST( vector_unpack_high )
         }
         for (i = 0; i < 4; i++)
             regs->VR_F(v1, i) = temp.sf[i];
+    #endif
         break;
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_unpack_high_32( regs->VR_Q(v2).v );
+    #else
         for (i = 0; i < 2; i++)
         {
             temp.sd[i] = regs->VR_F(v2, i);
@@ -5819,6 +7834,7 @@ DEF_INST( vector_unpack_high )
         }
         for (i = 0; i < 2; i++)
             regs->VR_D(v1, i) = temp.sd[i];
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
@@ -5992,25 +8008,44 @@ DEF_INST( vector_load_complement )
     UNREFERENCED( m4 );
     UNREFERENCED( m5 );
 
+    /* may be unreferenced */
+    UNREFERENCED( i );
+
     ZVECTOR_CHECK( regs );
 
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_complement_8( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 16; i++)
             regs->VR_B( v1, i ) = ~(S8)regs->VR_B( v2, i ) + 1;
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_complement_16( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 8; i++)
             regs->VR_H( v1, i ) = ~(S16)regs->VR_H( v2, i ) + 1;
-        break;
+    #endif
+            break;
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_complement_32( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 4; i++)
             regs->VR_F( v1, i ) = ~(S32)regs->VR_F( v2, i ) + 1;
-        break;
+    #endif
+            break;
     case 3:  /* Doubleword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = v128_complement_64( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 2; i++)
             regs->VR_D( v1, i ) = ~(S64)regs->VR_D( v2, i ) + 1;
+    #endif
         break;
     default:
         ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
@@ -6039,22 +8074,34 @@ DEF_INST( vector_load_positive )
     switch (m3)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_abs_epi8( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 16; i++)
             regs->VR_B( v1, i ) = (S8)regs->VR_B( v2, i ) < 0 ?
                                         -((S8)regs->VR_B( v2, i )) :
                                         (S8)regs->VR_B( v2, i );
+    #endif
         break;
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_abs_epi16( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 8; i++)
             regs->VR_H( v1, i ) = (S16)regs->VR_H( v2, i ) < 0 ?
                                          -((S16)regs->VR_H( v2, i )) :
                                          (S16)regs->VR_H( v2, i );
+    #endif
         break;
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_abs_epi32( regs->VR_Q(v2).v );
+    #else
         for (i=0; i < 4; i++)
             regs->VR_F( v1, i ) = (S32)regs->VR_F( v2, i ) < 0 ?
                                          -((S32)regs->VR_F( v2, i )) :
                                          (S32)regs->VR_F( v2, i );
+    #endif
         break;
     case 3:  /* Doubleword */
         for (i=0; i < 2; i++)
@@ -6092,15 +8139,23 @@ DEF_INST( vector_average_logical )
     switch (m4)
     {
     case 0:         /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_avg_epu8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) = (U8) ( ( (U16) regs->VR_B(v2, i) + (U16) regs->VR_B(v3, i) + 1) >> 1 );
         }
+    #endif
         break;
 
     case 1:         /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_avg_epu16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = (U16) ( ( (U32) regs->VR_H(v2, i) + (U32) regs->VR_H(v3, i) + 1) >> 1 );
         }
+    #endif
         break;
 
     case 2:         /* Word */
@@ -6297,30 +8352,53 @@ DEF_INST(vector_add)
     UNREFERENCED( m5 );
     UNREFERENCED( m6 );
 
+    /* i maybe unreferenced */
+    UNREFERENCED( i );
+
     ZVECTOR_CHECK(regs);
 
     switch (m4)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_add_epi8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) = (S8) regs->VR_B(v2, i) + (S8) regs->VR_B(v3, i);
         }
+    #endif
         break;
+
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_add_epi16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = (S16) regs->VR_H(v2, i) + (S16) regs->VR_H(v3, i);
         }
+    #endif
         break;
+
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_add_epi32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 4; i++) {
             regs->VR_F(v1, i) = (S32) regs->VR_F(v2, i) + (S32) regs->VR_F(v3, i);
         }
+    #endif
         break;
+
     case 3:  /* Doubleword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_add_epi64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 2; i++) {
             regs->VR_D(v1, i) = (S64) regs->VR_D(v2, i) + (S64) regs->VR_D(v3, i);
         }
+    #endif
         break;
+
     case 4:  /* Quadword */
 #if defined( _MSVC_ )
         copyv2.Q = regs->VR_Q(v2);
@@ -6410,30 +8488,53 @@ DEF_INST(vector_subtract)
     UNREFERENCED( m5 );
     UNREFERENCED( m6 );
 
+    /* i maybe unreferenced */
+    UNREFERENCED( i );
+
     ZVECTOR_CHECK(regs);
 
     switch (m4)
     {
     case 0:  /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_sub_epi8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) = (S8) regs->VR_B(v2, i) - (S8) regs->VR_B(v3, i);
         }
+    #endif
         break;
+
     case 1:  /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_sub_epi16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = (S16) regs->VR_H(v2, i) - (S16) regs->VR_H(v3, i);
         }
+    #endif
         break;
+
     case 2:  /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_sub_epi32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 4; i++) {
             regs->VR_F(v1, i) = (S32) regs->VR_F(v2, i) - (S32) regs->VR_F(v3, i);
         }
+    #endif
         break;
+
     case 3:  /* Doubleword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_sub_epi64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 2; i++) {
             regs->VR_D(v1, i) = (S64)regs->VR_D(v2, i) - (S64)regs->VR_D(v3, i);
         }
+    #endif
         break;
+
     case 4:  /* Quadword */
 #if defined( _MSVC_ )
         copyv2.Q = regs->VR_Q(v2);
@@ -6452,6 +8553,57 @@ DEF_INST(vector_subtract)
     ZVECTOR_END(regs);
 }
 
+
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* Intrinsic version of                                              */
+/*-------------------------------------------------------------------*/
+/* E7F8 VCEQ   - Vector Compare Equal                        [VRR-b] */
+/*-------------------------------------------------------------------*/
+DEF_INST( vector_compare_equal )
+{
+    int     v1, v2, v3, m4, m5;
+
+    VRR_B( inst, regs, v1, v2, v3, m4, m5 );
+
+    ZVECTOR_CHECK( regs );
+
+#define M5_CS ((m5 & 0x1) != 0) // Condition Code Set
+
+    switch (m4)
+    {
+    case 0:  /* Byte */
+        regs->VR_Q(v1).v = v128_compare_equal_8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 1:  /* Halfword */
+        regs->VR_Q(v1).v = v128_compare_equal_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 2:  /* Word */
+        regs->VR_Q(v1).v = v128_compare_equal_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 3:  /* Doubleword */
+        regs->VR_Q(v1).v = v128_compare_equal_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    default:
+        ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
+        break;
+    }
+
+    if (M5_CS)
+        regs->psw.cc = v128_compare_equal_cc( regs->VR_Q(v1).v );
+
+        #undef M5_CS
+
+    ZVECTOR_END( regs );
+}
+
+#else
+/* ================================================================= */
+/* Portable C of                                                     */
 /*-------------------------------------------------------------------*/
 /* E7F8 VCEQ   - Vector Compare Equal                        [VRR-b] */
 /*-------------------------------------------------------------------*/
@@ -6530,7 +8682,56 @@ DEF_INST( vector_compare_equal )
 
     ZVECTOR_END( regs );
 }
+#endif
 
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* Intrinsic version of                                              */
+/*-------------------------------------------------------------------*/
+/* E7F9 VCHL   - Vector Compare High Logical                 [VRR-b] */
+/*-------------------------------------------------------------------*/
+DEF_INST( vector_compare_high_logical )
+{
+    int     v1, v2, v3, m4, m5;
+
+    VRR_B( inst, regs, v1, v2, v3, m4, m5 );
+
+    ZVECTOR_CHECK( regs );
+
+#define M5_CS ((m5 & 0x1) != 0) // Condition Code Set
+
+    switch (m4)
+    {
+        case 0:  /* Byte */
+        regs->VR_Q(v1).v = v128_compare_high_logical_8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 1:  /* Halfword */
+        regs->VR_Q(v1).v = v128_compare_high_logical_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 2:  /* Word */
+        regs->VR_Q(v1).v = v128_compare_high_logical_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 3:  /* Doubleword */
+        regs->VR_Q(v1).v = v128_compare_high_logical_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    default:
+        ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
+        break;
+    }
+
+    if (M5_CS)
+        regs->psw.cc = v128_compare_high_cc( regs->VR_Q(v1).v );
+#undef M5_CS
+
+    ZVECTOR_END( regs );
+}
+#else
+/* ================================================================= */
+/* Portable C of                                                     */
 /*-------------------------------------------------------------------*/
 /* E7F9 VCHL   - Vector Compare High Logical                 [VRR-b] */
 /*-------------------------------------------------------------------*/
@@ -6613,7 +8814,58 @@ DEF_INST( vector_compare_high_logical )
 
     ZVECTOR_END( regs );
 }
+#endif
 
+#if defined ( FEATURE_V128_SSE )
+/* ================================================================= */
+/* Intrinsic version of                                              */
+/*-------------------------------------------------------------------*/
+/* E7FB VCH    - Vector Compare High                         [VRR-b] */
+/*-------------------------------------------------------------------*/
+DEF_INST( vector_compare_high )
+{
+    int     v1, v2, v3, m4, m5;
+
+    VRR_B( inst, regs, v1, v2, v3, m4, m5 );
+
+    ZVECTOR_CHECK( regs );
+
+#define M5_CS ((m5 & 0x1) != 0) // Condition Code Set
+
+    switch (m4)
+    {
+    case 0:  /* Byte */
+        regs->VR_Q(v1).v = v128_compare_high_8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 1:  /* Halfword */
+        regs->VR_Q(v1).v = v128_compare_high_16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 2:  /* Word */
+        regs->VR_Q(v1).v = v128_compare_high_32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    case 3:  /* Doubleword */
+        regs->VR_Q(v1).v = v128_compare_high_64( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+        break;
+
+    default:
+        ARCH_DEP( program_interrupt )( regs, PGM_SPECIFICATION_EXCEPTION );
+        break;
+    }
+
+    if (M5_CS)
+        regs->psw.cc = v128_compare_high_cc( regs->VR_Q(v1).v );
+
+#undef M5_CS
+
+    ZVECTOR_END( regs );
+}
+
+#else
+/* ================================================================= */
+/* Portable C of                                                     */
 /*-------------------------------------------------------------------*/
 /* E7FB VCH    - Vector Compare High                         [VRR-b] */
 /*-------------------------------------------------------------------*/
@@ -6696,6 +8948,7 @@ DEF_INST( vector_compare_high )
 
     ZVECTOR_END( regs );
 }
+#endif
 
 /*-------------------------------------------------------------------*/
 /* E7FC VMNL   - Vector Minimum Logical                      [VRR-c] */
@@ -6717,21 +8970,33 @@ DEF_INST( vector_minimum_logical )
     switch (m4)
     {
     case 0:         /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_min_epu8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) =  regs->VR_B(v2, i) <= regs->VR_B(v3, i) ? regs->VR_B(v2, i) : regs->VR_B(v3, i);
         }
+    #endif
         break;
 
     case 1:         /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_min_epu16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = regs->VR_H(v2, i) <= regs->VR_H(v3, i) ? regs->VR_H(v2, i) : regs->VR_H(v3, i);
         }
+    #endif
         break;
 
     case 2:         /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_min_epu32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 4; i++) {
             regs->VR_F(v1, i) = regs->VR_F(v2, i) <= regs->VR_F(v3, i) ? regs->VR_F(v2, i) : regs->VR_F(v3, i);
         }
+    #endif
         break;
 
     case 3:         /* Doubleword */
@@ -6768,21 +9033,33 @@ DEF_INST( vector_maximum_logical )
     switch (m4)
     {
     case 0:         /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_max_epu8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) =  regs->VR_B(v2, i) >= regs->VR_B(v3, i) ? regs->VR_B(v2, i) : regs->VR_B(v3, i);
         }
+    #endif
         break;
 
     case 1:         /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_max_epu16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = regs->VR_H(v2, i) >= regs->VR_H(v3, i) ? regs->VR_H(v2, i) : regs->VR_H(v3, i);
         }
+    #endif
         break;
 
     case 2:         /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_max_epu32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 4; i++) {
             regs->VR_F(v1, i) = regs->VR_F(v2, i) >= regs->VR_F(v3, i) ? regs->VR_F(v2, i) : regs->VR_F(v3, i);
         }
+    #endif
         break;
 
     case 3:         /* Doubleword */
@@ -6819,21 +9096,33 @@ DEF_INST( vector_minimum )
     switch (m4)
     {
     case 0:         /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_min_epi8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) = (S8) regs->VR_B(v2, i) <= (S8) regs->VR_B(v3, i) ? regs->VR_B(v2, i) : regs->VR_B(v3, i);
         }
+    #endif
         break;
 
     case 1:         /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_min_epi16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = (S16) regs->VR_H(v2, i) <= (S16) regs->VR_H(v3, i) ? regs->VR_H(v2, i) : regs->VR_H(v3, i);
         }
+    #endif
         break;
 
     case 2:         /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_min_epi32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 4; i++) {
             regs->VR_F(v1, i) = (S32) regs->VR_F(v2, i) <= (S32) regs->VR_F(v3, i) ? regs->VR_F(v2, i) : regs->VR_F(v3, i);
         }
+    #endif
         break;
 
     case 3:         /* Doubleword */
@@ -6869,21 +9158,33 @@ DEF_INST( vector_maximum )
     switch (m4)
     {
     case 0:         /* Byte */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_max_epi8( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 16; i++) {
             regs->VR_B(v1, i) = (S8) regs->VR_B(v2, i) >= (S8) regs->VR_B(v3, i) ? regs->VR_B(v2, i) : regs->VR_B(v3, i);
         }
+    #endif
         break;
 
     case 1:         /* Halfword */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_max_epi16( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 8; i++) {
             regs->VR_H(v1, i) = (S16) regs->VR_H(v2, i) >= (S16) regs->VR_H(v3, i) ? regs->VR_H(v2, i) : regs->VR_H(v3, i);
         }
+    #endif
         break;
 
     case 2:         /* Word */
+    #if defined( FEATURE_V128_SSE )
+        regs->VR_Q(v1).v = _mm_max_epi32( regs->VR_Q(v2).v, regs->VR_Q(v3).v);
+    #else
         for (i=0; i < 4; i++) {
             regs->VR_F(v1, i) = (S32) regs->VR_F(v2, i) >= (S32) regs->VR_F(v3, i) ? regs->VR_F(v2, i) : regs->VR_F(v3, i);
         }
+    #endif
         break;
 
     case 3:         /* Doubleword */
