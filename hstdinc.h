@@ -109,6 +109,11 @@
   #define _GCC_SSE2_
 #endif
 
+#if defined( __GNUC__) && defined(__aarch64__) && defined(__ARM_NEON)
+    #include "sse2neon.h"
+    #define FEATURE_V128_SSE 1
+#endif
+
 #include <stddef.h>             // (ptrdiff_t, size_t, offsetof, etc)
 #include <stdio.h>
 #include <stdlib.h>
