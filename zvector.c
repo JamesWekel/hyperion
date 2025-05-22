@@ -46,23 +46,6 @@
 
   // #undef FEATURE_V128_SSE
 
-    /* ARM AArch64 processor? */
-    #if defined( __aarch64__ ) &&  defined( __ARM_NEON )
-
-        /* Gcc 10+ / Clang 11+ */
-        #if ( (defined( __clang_major__ ) && __clang_major__ >= 11  ) ||   \
-            (defined( __GNUC__ ) && __GNUC__ >= 10  )                    \
-            )
-
-            // use sse2neon for translation of SSE interinsics to Arm Neon intrinsics
-            #define SSE2NEON_SUPPRESS_WARNINGS
-            #include "sse2neon.h"
-            #define FEATURE_V128_NEON 1
-            #define FEATURE_V128_SSE 1
-        #endif
-
-    #endif
-
   /* compile debug message: are we using intrinsics? */
   #if 1
     #if defined( FEATURE_V128_SSE )
