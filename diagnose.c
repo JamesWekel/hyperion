@@ -183,6 +183,10 @@ struct ipl_parameter_block {
 #define DIAG308_RC_OK        0x0001
 #define DIAG308_RC_NOCONFIG  0x0102
 
+// predefine ipl.c s390_common_load_finish function here
+// so it can be called from diagnose 308 subcode 1
+int s390_common_load_finish(REGS *regs);
+
 #endif // COMPILE_THIS_ONLY_ONCE
 
 #ifndef STOP_CPUS_AND_IPL
@@ -540,72 +544,224 @@ U32   code;
         break;
 #endif /*FEATURE_EMULATE_VM*/
 
-
     case 0x308:
     /*---------------------------------------------------------------*/
     /* Diagnose 308: IPL functions                                   */
     /*---------------------------------------------------------------*/
+    /* DIAG  r1,r3,0x308                                             */
+    /*---------------------------------------------------------------*/
+    /* On entry                                                      */
+    /*   R3   Function subcode                                       */
+    /*   R1   R1 must be an even numbered register defining an       */
+    /*        even-odd pair                                          */
+    /*        r1  (even) - an optional argument depending on subcode */
+    /*        r1+1 (odd) - return code                               */
+    /*---------------------------------------------------------------*/
+    /* Note: Incomplete experimental implementation                  */
+    /*---------------------------------------------------------------*/
+    /* Note: Linux source and experimentation with s390 Ubuntu 26.04 */
+    /*        was used to develop this version of Diag 308.          */
+    /*                                                               */
+    /* Linux was used to test                                        */
+    /*      DIAG308_START_KERNEL          subcode 1                  */
+    /*      DIAG308_LOAD_NORMAL_DUMP      subcode 4                  */
+    /*      DIAG308_SET                   subcode 5                  */
+    /*      DIAG308_STORE                 subcode 6                  */
+    /*                                                               */
+    /* Other subcodes were not observed.                             */
+    /*---------------------------------------------------------------*/
+    /* Note: CC is not changed by this implementation. Linux source  */
+    /*       indicates that CC is modified, but there is no          */
+    /*       documentation available on when or how CC is modified.  */
+    /*---------------------------------------------------------------*/
+    {
+        int rc      = DIAG308_RC_OK;         /* rc for diag         */
+        int cpu     = regs->cpuad;           /* running on this cpu */
+        int clear   = false;                 /* not clear IPL       */
+        int subcode = regs->GR_L(r3);        /* subcode             */
+
         PTT_ERR("*DIAG308",regs->GR_G(r1),regs->GR_G(r3),regs->psw.IA_L);
 
-        switch(regs->GR_L(r3))
+        /* some validation */
+        /* Must be in ESA/390 or z/arch mode */
+        if( regs->arch_mode == ARCH_370_IDX )
+            ARCH_DEP(program_interrupt)(regs, PGM_SPECIFICATION_EXCEPTION);
+
+        /* Program check if running problem state. */
+        PRIV_CHECK(regs);
+
+        /* Program check if Rx is not an even register number */
+        if ( r1 & 1 )
         {
-#if defined(FEATURE_PROGRAM_DIRECTED_REIPL)
-            TID   tid;                              /* Thread identifier         */
-            char *ipltype;                          /* "ipl" or "iplc"           */
-            int   rc;
-#endif /*defined(FEATURE_PROGRAM_DIRECTED_REIPL)*/
+            ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+        }
 
+        /* clear on ipl? */
+        if ( subcode == DIAG308_LOAD_CLEAR ) clear = true;
+
+        switch( subcode )
+        {
         case DIAG308_START_KERNEL:
-            /*-------------------------------------------------------*/
-            /* Linux for z uses this function code, without a        */
-            /* defined value, in a function named start_kernel (see  */
-            /* ZIPL stage3.c). The Diagnose instruction is DIAG      */
-            /* 1,1,0x308, with GPR 1 containing DIAG308_START_KERNEL */
-            /* (i.e. equal to 1). This author has no idea what       */
-            /* function start_kernel is expecting the Diagnose       */
-            /* instruction to do (other than starting the kernel!),  */
-            /* but the function does not check a return code, or     */
-            /* anything else, and is prepared for the Diagnose       */
-            /* instruction to program check. Fortunately, the        */
-            /* function code DIAG308_START_KERNEL and the return     */
-            /* code DIAG308_RC_OK both have the same value (i.e.     */
-            /* equal to 1), so we'll simply return without doing     */
-            /* anything, letting the function code become the        */
-            /* return code.                                          */
-            /*-------------------------------------------------------*/
-            break;
+          /*-------------------------------------------------------*/
+          /* DIAG308_START_KERNEL: Subcode 1                       */
+          /*-------------------------------------------------------*/
+          /* From Linux: ZIPL boot loader has loaded the kernel    */
+          /* and need to start the kernel. An ESA/390 PSW is       */
+          /* provided at address 0. CPU reset et al is required,   */
+          /* similar to a normal IPL. Just use common_load_begin   */
+          /* and s390_common_load_finish from ipl.c.               */
+          /*-------------------------------------------------------*/
+          /* On entry                                              */
+          /*   r1    is not used                                   */
+          /*-------------------------------------------------------*/
+          {
+            OBTAIN_INTLOCK( NULL );
+            {
+                /* Get started */
+                if ( ARCH_DEP( common_load_begin )( cpu, clear ) != 0 )
+                {
+                    rc = DIAG308_RC_NOCONFIG;
+                }
 
-#if defined(FEATURE_PROGRAM_DIRECTED_REIPL)
-        case DIAG308_LOAD_CLEAR:
-            ipltype = "iplc";
-            goto diag308_cthread;
-        case DIAG308_LOAD_NORMAL:
-            ipltype = "ipl";
-        diag308_cthread:
-            rc = create_thread(&tid, DETACHED, stop_cpus_and_ipl, ipltype, "Stop cpus and ipl");
-            if(rc)
-                WRMSG(HHC00102, "E", strerror(rc));
-            regs->cpustate = CPUSTATE_STOPPING;
-            ON_IC_INTERRUPT(regs);
+                /* ESA/390 psw should be at address zero */
+
+                /* finish; use ESA/390 version of common_load_finish     */
+                /* as PSW is ESA/390 format                              */
+                if ( rc == DIAG308_RC_OK  &&
+                     s390_common_load_finish(regs) != 0
+                   )
+                {
+                    rc = DIAG308_RC_NOCONFIG;
+                }
+            }
+            RELEASE_INTLOCK( NULL );
+
+            regs->GR_L(r1+1) = rc;
             break;
+          }
+
+        case DIAG308_LOAD_CLEAR:                     /* sub code 3 */
+        case DIAG308_LOAD_NORMAL_DUMP:               /* sub code 4 */
+        case DIAG308_LOAD_NORMAL:                    /* sub code 7 */
+          /*-------------------------------------------------------*/
+          /* Perform an IPL.                                       */
+          /* Note: only a CCW ipl is supported because DIAG308_SET */
+          /*       only accepts a CCW IPL block                    */
+          /*-------------------------------------------------------*/
+          /* On entry                                              */
+          /*   r1    is not used                                   */
+          /*-------------------------------------------------------*/
+          {
+            OBTAIN_INTLOCK( NULL );
+            {
+                /* Get started */
+                /* first: an inital cpu reset for this cpu */
+                if ( initial_cpu_reset( regs ) != 0 )
+                {
+                    rc = DIAG308_RC_NOCONFIG;
+                }
+
+                /* second: do a ccw IPL */
+                if ( rc == DIAG308_RC_OK &&
+                     load_ipl( sysblk.ipllcss, sysblk.ipldev, cpu, clear) != 0
+                   )
+                {
+                    rc = DIAG308_RC_NOCONFIG;
+                }
+            }
+            RELEASE_INTLOCK( NULL );
+
+            regs->GR_L(r1+1) = rc;
+            break;
+          }
+
         case DIAG308_SET:
-            /* INCOMPLETE */
-            regs->GR(1) = DIAG308_RC_OK;
+          /*-------------------------------------------------------*/
+          /* DIAG308_SET: Subcode 5: Upload IPLB to PR/SM          */
+          /*-------------------------------------------------------*/
+          /* set system ipllcs, ipldev and loadparm from           */
+          /* a CCW IPL block                                       */
+          /*-------------------------------------------------------*/
+          /* On entry                                              */
+          /*   r1    contains the real address of a 4K page        */
+          /*         which contains an IPL parameter block         */
+          /*-------------------------------------------------------*/
+          {
+            RADR    stgarea;            /* Storage area real address */
+            struct ipl_parameter_block  ipb;
+            U32     headsize;
+            U32     bodysize;
+
+            /* Register Rx contains the real address of the storage area. */
+            if(regs->psw.amode64) {
+                stgarea = regs->GR_G(r1);
+            } else {
+                stgarea = regs->GR_L(r1);
+            }
+
+            /* Program check if the address contained in Rx      */
+            /* is not on a 4K page boundary.                     */
+            if ( stgarea & 0xFFF)
+            {
+                ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+            }
+
+            /* Ensure that the 4K storage area is addressable. */
+            ARCH_DEP(validate_operand) (stgarea, USE_REAL_ADDR, 4095, ACCTYPE_READ, regs);
+
+            /* Get the IPL parameter block in real storage */
+            headsize = sizeof(struct ipl_pl_hdr);
+            bodysize = sizeof(struct ipl_pb0_ccw);
+
+            /* Fetch the IPL parameter block in real storage         */
+            /* NOTE: fields are BIG ENDIAN; access values with CSWAP */
+            /* Note: vstorec copies a maximum of 256 bytes.          */
+            ARCH_DEP(vfetchc) (&ipb, (headsize+bodysize-1), stgarea, USE_REAL_ADDR, regs);
+
+            /* Validate the IPL parameter block. */
+            /* validate structure */
+            if (   0 ||
+                   ipb.hdr.version > IPL_MAX_SUPPORTED_VERSION ||
+                   CSWAP32(ipb.hdr.len) > (headsize + bodysize) ||
+                   CSWAP32(ipb.ccw.len) != bodysize
+                )
+            {
+                WRMSG(HHC01960, "E", ipb.hdr.version, CSWAP32(ipb.hdr.len), CSWAP32(ipb.ccw.len) );
+                ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+            }
+
+            /* validate: only support CCW type IPL block*/
+            if ( ipb.ccw.pbt != IPL_TYPE_CCW)
+            {
+                WRMSG(HHC01961, "E");
+                ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+            }
+
+            memset( &sysblk.loadparm, 0, sizeof(sysblk.loadparm) );
+            memcpy( &sysblk.loadparm, (unsigned char *) &ipb.common.loadparm, sizeof(ipb.common.loadparm) );
+            STORE_HW(&sysblk.ipldev, ipb.ccw.devno);
+            sysblk.ipllcss = ipb.ccw.ssid;
+
+            /* Successful */
+            regs->GR(r1+1) = DIAG308_RC_OK;
             break;
-#endif /*defined(FEATURE_PROGRAM_DIRECTED_REIPL)*/
+          }
 
         case DIAG308_STORE:
+          /*-------------------------------------------------------*/
+          /* DIAG308_STORE: Subcode 6:                             */
+          /*                      Retrieve current IPLB from PR/SM */
+          /*-------------------------------------------------------*/
+          /* On entry                                              */
+          /*   Rx    Rx must be an even numbered register          */
+          /*         containing the real address of a 4K page      */
+          /*         aligned storage area into which the IPL       */
+          /*         parameter block will be copied.               */
+          /* On return                                             */
+          /*   Rx+1  Contains the return code.                     */
+          /*-------------------------------------------------------*/
           {
-            /*-------------------------------------------------------*/
-            /* On entry                                              */
-            /*   Rx    Rx must be an even numbered register          */
-            /*         containing the real address of a 4K page      */
-            /*         aligned storage area into which the IPL       */
-            /*         parameter block will be copied.               */
-            /* On return                                             */
-            /*   Rx+1  Contains the return code.                     */
-            /*-------------------------------------------------------*/
-            RADR    stgarea;            /* Storage area real address */
+            RADR    stgarea;          /* Storage area real address */
             U32     headsize;
             U32     bodysize;
             struct ipl_parameter_block  ipb;
@@ -663,6 +819,7 @@ U32   code;
             ARCH_DEP(program_interrupt)(regs, PGM_SPECIFICATION_EXCEPTION);
         } /* end switch(r3) */
         break;
+    }
 
 #ifdef FEATURE_HERCULES_DIAGCALLS
     case 0xF00:
