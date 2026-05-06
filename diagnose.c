@@ -625,6 +625,13 @@ U32   code;
 
                 /* ESA/390 psw should be at address zero */
 
+                /* NOTE: run_cpu() will allocate a TXF page map */
+                /* make sure that it is freed                   */
+                if (regs->txf_pagesmap->altpageaddr)
+                {
+                    TXF_FREEMAP( regs );
+                }
+
                 /* finish; use ESA/390 version of common_load_finish     */
                 /* as PSW is ESA/390 format                              */
                 if ( rc == DIAG308_RC_OK  &&
@@ -659,6 +666,13 @@ U32   code;
                 if ( initial_cpu_reset( regs ) != 0 )
                 {
                     rc = DIAG308_RC_NOCONFIG;
+                }
+
+                /* NOTE: run_cpu() will allocate a TXF page map */
+                /* make sure that it is freed                   */
+                if (regs->txf_pagesmap->altpageaddr)
+                {
+                    TXF_FREEMAP( regs );
                 }
 
                 /* second: do a ccw IPL */
