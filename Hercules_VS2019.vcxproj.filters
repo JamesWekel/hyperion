@@ -1091,6 +1091,9 @@
     <None Include="readme\README.VMFPLC2.md">
       <Filter>Other Files\DOC\README</Filter>
     </None>
+    <None Include="readme\README.WDT288.md">
+      <Filter>Other Files\DOC\README</Filter>
+    </None>
     <None Include="readme\README.WIN64.md">
       <Filter>Other Files\DOC\README</Filter>
     </None>
@@ -4418,6 +4421,12 @@
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="w32util.h">
+      <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="wdt288.h">
+      <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="wdt288.h">
       <Filter>Source Files\Hercules\Emulation\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="x75.h">

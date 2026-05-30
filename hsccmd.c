@@ -67,6 +67,7 @@ DISABLE_GCC_UNUSED_FUNCTION_WARNING;
 #include "qeth.h"
 #include "cckddasd.h"
 #include "inline.h"
+#include "wdt288.h"
 
 //-------------------------------------------------------------------
 //                      ARCH_DEP() code
@@ -10151,6 +10152,221 @@ int cmdlvl_cmd( int argc, char* argv[], char* cmdline )
     return 0;
 }
 
+
+/*-------------------------------------------------------------------*/
+/* wdt -- watchdog timer (diagnose 288) commands:                    */
+/*           wdt cmdsep ; | off                                      */
+/*           wdt cmds "..."                                          */
+/*           wdt off | disable                                       */
+/*           wdt on  | enable                                        */
+/*           wdt [status]                                            */
+/*           wdt $expire                    (for testing only)       */
+/*-------------------------------------------------------------------*/
+int wdt_cmd( int argc, char* argv[], char* cmdline )
+{
+    char *cmds          = NULL;
+    char *cmdsep        = NULL;
+
+    UNREFERENCED( cmdline );
+    UPPER_ARGV_0( argv );
+
+    // logmsg( "wdt_cmd: argc=%d\n", argc );
+    // for (int i=0; i < argc; i++)
+    //     logmsg( "wdt_cmd: argv[%d]=%s\n", i, argv[i] );
+
+    // Too many arguments?
+    if (argc > 3)
+    {
+        // "Invalid command usage. Type 'help %s' for assistance."
+        WRMSG( HHC02299, "E", argv[0] );
+        return -1;
+    }
+
+    // any arguments?
+    if (argc == 1)
+    {
+        return wdt288_show_status();
+    }
+
+    /* ------------------------------------- */
+    /* parse command based on the 1st option */
+    /* ------------------------------------- */
+    /* ENABLE                                */
+    /* ------------------------------------- */
+    if  ( 0
+          || strcasecmp( argv[1], "ON"   ) == 0
+          || strcasecmp( argv[1], "ENABLE" ) == 0
+        )
+    {
+        /* no option */
+        if ( argc != 2 )
+        {
+            WRMSG( HHC02205, "E", argv[2], "" );
+            return -1;
+        }
+
+        if ( wdt288_set_enabled( ) )
+        {
+            // "Watchdog timer: no commands have been defined; can not be enabled"
+            WRMSG( HHC01959, "I", "no commands have been defined; can not be enabled" );
+            return -1;
+        }
+        else
+        {
+            WRMSG( HHC02204 , "I", "WDT", "enabled" );
+            return 0;
+        }
+    }
+
+    /* ------------------------------------- */
+    /* DISABLE                               */
+    /* ------------------------------------- */
+    else if (   0
+                || strcasecmp( argv[1], "OFF"   ) == 0
+                || strcasecmp( argv[1], "DISABLE" ) == 0
+            )
+    {
+        /* no option */
+        if ( argc != 2 )
+        {
+            WRMSG( HHC02205, "E", argv[2], "" );
+            return -1;
+        }
+
+        if ( wdt288_set_disabled( ) )
+        {
+            // "Watchdog timer: enabled-active, can not be disabled"
+            WRMSG( HHC01959, "E", "timer is enabled-active, can not be disabled" );
+            return -1;
+        }
+        else
+        {
+            WRMSG( HHC02204 , "I", "WDT", "disabled" );
+            return 0;
+        }
+    }
+
+    /* ------------------------------------- */
+    /* STATUS                                */
+    /* ------------------------------------- */
+    else if ( strcasecmp( argv[1], "STATUS" ) == 0 )
+    {
+        /* no option */
+        if ( argc != 2 )
+        {
+            WRMSG( HHC02205, "E", argv[2], "" );
+            return -1;
+        }
+
+        return wdt288_show_status();
+    }
+
+    /* ------------------------------------- */
+    /* CMDSEP                                */
+    /* ------------------------------------- */
+    else if ( strcasecmp( argv[1], "CMDSEP" ) == 0)
+    {
+        if (   argc == 2  ||                                         // no character
+             ( argc == 3 && strcasecmp( argv[2], "OFF" ) == 0 )      // explicit: no character
+           )
+        {
+            cmdsep = "\0";
+        }
+
+        else if (argc == 3 && strlen(  argv[2] ) > 1)
+        {
+                        // "Invalid argument %s%s"
+            WRMSG( HHC02205, "E", argv[2], "" );
+            return -1;
+        }
+        else
+        {
+            cmdsep = argv[2];
+        }
+
+        wdt288_set_cmdsep( cmdsep[0] );
+        WRMSG( HHC02204 , "I", "WDT CMDSEP", cmdsep );
+        return 0;
+    }
+
+
+    /* ------------------------------------- */
+    /* CMDS                                  */
+    /* ------------------------------------- */
+    else if (strcasecmp( argv[1], "CMDS" ) == 0)
+    {
+        if (argc == 3)
+        {
+            /* programmer's note: the parser strips of the trailing double quote! */
+            /* in the cmds "..." command    */
+            cmds = argv[2];
+            if (cmds[0] == '\"') cmds++;      /* ignore first quote if there is one */
+        }
+        else
+        {
+            cmds = NULL;  /* set cmds to null if not specified */
+        }
+
+        switch ( wdt288_set_expiry_cmds( cmds ) )
+        {
+        case  0:            // ok
+            WRMSG( HHC02204 , "I", "WDT CMDS", cmds );
+            return 0;
+
+        case -1:            // "Diagnose 0x288 Watchdog Timer: Error in function %s: %s"
+            WRMSG( HHC01956, "E", "WDT CMDS", "timer is enabled; commands cannot be empty" );
+            return -1;
+
+        case -2:            // "Diagnose 0x288 Watchdog Timer: Error in function %s: %s"
+            WRMSG( HHC01956, "E", "wdt288_set_expiry_cmds: malloc()", strerror( errno ) );
+            return -1;
+
+        case -3:
+                            // "Diagnose 0x288 Watchdog Timer: Error in function %s: %s"
+            WRMSG( HHC01956, "E", "WDT CMDS:", "length of commands is greater than 240 characters" );
+            return -1;
+
+        default:
+            break;
+        }
+    }
+
+    /* ------------------------------------- */
+    /* $EXPIRE                               */
+    /* ------------------------------------- */
+    else if ( strcasecmp( argv[1], "$EXPIRE" ) == 0)
+    {
+        /* no option */
+        if ( argc != 2 )
+        {
+            WRMSG( HHC02205, "E", argv[2], "" );
+            return -1;
+        }
+
+        if ( wdt288_test_expire( ) )
+        {
+            // "Watchdog timer: enabled-active, can not be disabled"
+            WRMSG( HHC01959, "E", "timer is not enabled-active; can not test timer expire" );
+            return -1;
+        }
+        else
+        {
+            // the following message is handled in wdt288_test_expire( )
+            // if the status is WDT288_IS_ENABLED_ACTIVE
+            //WRMSG( HHC02204 , "I", "WDT", "expired" );
+            return 0;
+        }
+    }
+
+    else
+    {
+        // "Invalid argument %s%s"
+        WRMSG( HHC02205, "E", argv[1], "" );
+        return -1;
+    }
+
+    return 0;
+}
 /* HSCCMD.C End-of-text */
 
 #endif // !defined(_GEN_ARCH)

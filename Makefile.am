@@ -528,6 +528,7 @@ libherc_la_SOURCES = \
   vmd250.c           \
   vstore.c           \
   x75.c              \
+  wdt288.c           \
   xstore.c           \
   zvector.c          \
   zvector2.c         \
@@ -905,6 +906,7 @@ EXTRA_DIST =                  \
   readme/README.TCPNJE.md         \
   readme/README.TRACEFILE.md      \
   readme/README.VMFPLC2.md        \
+  readme/README.WDT288.md         \
   readme/README.WIN64.md          \
   RELEASE.NOTES               \
   retail-all.jobs             \
@@ -1135,6 +1137,7 @@ noinst_HEADERS =          \
   w32stape.h              \
   w32util.c               \
   w32util.h               \
+  wdt288.h                \
   x75.h                   \
   zfcp.h                  \
   zvector.h               \
