@@ -1228,6 +1228,10 @@
 							>
 						</File>
 						<File
+							RelativePath=".\wdt288.c"
+							>
+						</File>
+						<File
 							RelativePath=".\x75.c"
 							>
 						</File>
@@ -1625,6 +1629,10 @@
 						</File>
 						<File
 							RelativePath=".\w32util.h"
+							>
+						</File>
+						<File
+							RelativePath=".\wdt288.h"
 							>
 						</File>
 						<File
@@ -2252,6 +2260,10 @@
 					</File>
 					<File
 						RelativePath=".\readme\README.VMFPLC2.md"
+						>
+					</File>
+					<File
+						RelativePath=".\readme\README.WDT288.md"
 						>
 					</File>
 					<File

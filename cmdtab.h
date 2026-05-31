@@ -1937,6 +1937,47 @@
   "the current PSW mode, which is the default.\n"
 
 #define version_cmd_desc        "Display version information"
+
+#define wdt_cmd_desc            "Set/Display Watchdog Timer parameters"
+#define wdt_cmd_help       \
+                           \
+  "Format: wdt [cmds \"...\"] | [cmdsep x] | [disable | off] | [enable | on] | [status]\n"    \
+  "\n" \
+  "  cmds \"...\":     Specify the Hercules configuration commands to be executed     \n"     \
+  "                  if the watchdog timer expires.\n"                                        \
+  "\n" \
+  "                  If spaces are included in the commands, double quotes are required.\n"   \
+  "                  The maximum size of the command line is 240 characters.\n"               \
+  "\n" \
+  "                  Multiple commands can be specified if a command line separator is\n"     \
+  "                  defined using the 'wdt cmdsep' command.\n"                               \
+  "\n" \
+  "                  The default is null; no commands are defined. Therefore, two wdt\n"      \
+  "                  configuration statements are required to enable the watchdog timer:\n"   \
+  "\n" \
+  "                  wdt cmd \"...\" \n"                                                      \
+  "                  wdt enable\n"                                                            \
+ "\n" \
+  "                  One additional command, 'pause xx', can be included for delay between\n" \
+  "                  commands. The pause value is seconds to delay. \n"                       \
+  "\n" \
+  "  cmdsep x:       Specify the separator between commands defined by 'wdt cmds'.\n"         \
+  "  cmdsep off:     Reset the separator to none.\n"                                          \
+  "\n" \
+  "  disable | off:  The watchdog timer will be disabled if the current timer state is\n"     \
+  "                  'enabled - inactive'.\n"                                                 \
+  "\n" \
+  "  enable | on:    The watchdog timer will be enabled if the current timer state is\n"      \
+  "                  'disabled' AND watchdog commands have been defined.\n"                   \
+  "\n" \
+  "  status:         Display the current Watchdog Timer status. This is the default action.\n"\
+  "\n" \
+  "  $expire:        If the watchdog timer state is 'enabled-active', temporarily set \n"     \
+  "                  the timer to expired! Use to test 'cmds \"...\"' commands. \n"           \
+  "                  BE careful, use comments to start!\n"                                    \
+  "\n" \
+  "See README.WDT288.md for more information on the Diagnose 0x288 Watchdog Timer.\n"
+
 #define xpndsize_cmd_desc       "Define/Display xpndsize parameter"
 #define xpndsize_cmd_help       \
                                 \
@@ -2134,6 +2175,7 @@ COMMAND( "shcmdopt",                shcmdopt_cmd,           SYSCFGNDIAG8,       
 COMMAND( "sysepoch",                sysepoch_cmd,           SYSCFGNDIAG8,       sysepoch_cmd_desc,      NULL                )
 COMMAND( "sysgport",                sysgport_cmd,           SYSCFGNDIAG8,       sysgport_cmd_desc,      NULL                )
 COMMAND( "tzoffset",                tzoffset_cmd,           SYSCFGNDIAG8,       tzoffset_cmd_desc,      NULL                )
+COMMAND( "wdt",                     wdt_cmd,                SYSCFGNDIAG8,       wdt_cmd_desc,           wdt_cmd_help        )
 COMMAND( "xpndsize",                xpndsize_cmd,           SYSCFGNDIAG8,       xpndsize_cmd_desc,      xpndsize_cmd_help   )
 COMMAND( "yroffset",                yroffset_cmd,           SYSCFGNDIAG8,       yroffset_cmd_desc,      NULL                )
 

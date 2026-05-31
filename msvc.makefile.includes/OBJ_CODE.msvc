@@ -156,6 +156,7 @@ hengine_OBJ = \
     $(O)vm.obj       \
     $(O)vmd250.obj   \
     $(O)vstore.obj   \
+    $(O)wdt288.obj   \
     $(O)x75.obj      \
     $(O)xstore.obj   \
     $(O)zvector.obj  \

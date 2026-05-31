@@ -470,6 +470,7 @@
     <ClCompile Include="w32ctca.c" />
     <ClCompile Include="w32stape.c" />
     <ClCompile Include="w32util.c" />
+    <ClCompile Include="wdt288.c" />
     <ClCompile Include="x75.c" />
     <ClCompile Include="xstore.c" />
     <ClCompile Include="zfcp.c" />
@@ -727,6 +728,7 @@
     <None Include="readme\README.TCPNJE.md" />
     <None Include="readme\README.TRACEFILE.md" />
     <None Include="readme\README.VMFPLC2.md" />
+    <None Include="readme\README.WDT288.md" />
     <None Include="readme\README.WIN64.md" />
     <None Include="RELEASE.NOTES" />
     <None Include="retail-all.jobs" />
@@ -1688,6 +1690,7 @@
     <ClInclude Include="w32mtio.h" />
     <ClInclude Include="w32stape.h" />
     <ClInclude Include="w32util.h" />
+    <ClInclude Include="wdt288.h" />
     <ClInclude Include="x75.h" />
     <ClInclude Include="zfcp.h" />
     <ClInclude Include="zvector.h" />
