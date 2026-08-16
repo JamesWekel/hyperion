@@ -10643,8 +10643,6 @@ int hmcwdt_cmd( int argc, char* argv[], char* cmdline )
         WRMSG( HHC02205, "E", argv[1], "" );
         return -1;
     }
-
-    return 0;
 }
 /* HSCCMD.C End-of-text */
 
