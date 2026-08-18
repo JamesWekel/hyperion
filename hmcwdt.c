@@ -359,8 +359,7 @@ U64 hmcwdt_get_expire_time( U32 timeout )
     #else
         // microsecond resolution getimeofday
         struct timeval  tv;
-        struct timezone tz;
-        rc = gettimeofday( &tv, &tz );
+        rc = gettimeofday( &tv, NULL );
         if( rc == 0 )
             us = SEC_TO_US((uint64_t)tv.tv_sec) + tv.tv_usec;
         else
