@@ -785,7 +785,9 @@ U32   code;
           /*   r1    is not used                                   */
           /*-------------------------------------------------------*/
           {
-            DBLWRD  saved_iplpsw;
+            union { U64     psw64;
+                    DBLWRD  d_psw;
+                  } savedpsw;
 
             if ( DIAG308_DEBUG )
             {
@@ -794,8 +796,18 @@ U32   code;
             }
 
             /* ESA/390 psw should be at address zero */
-            /* save                                  */
-            memcpy( saved_iplpsw, regs->psa->iplpsw, sizeof( DBLWRD ) );
+            /* save and validate                     */
+            memcpy( savedpsw.d_psw, regs->psa->iplpsw, sizeof( savedpsw.d_psw ) );
+
+            /* check that psw bits 0, 2-4 are zero, bit 12 is one, and bits 25-30 are zero.*/
+            if ( ( ( CSWAP64(savedpsw.psw64) & 0xB808007E00000000ULL) != 0x0008000000000000ULL ) )
+            {
+                char buff[128];
+                snprintf( buff, sizeof(buff),
+                    "Expected a short PSW at address 0. Found psw=%16.16"PRIX64".\n", CSWAP64(savedpsw.psw64) );
+                WRMSG(HHC01961, "E", subcode, buff);
+                ARCH_DEP(program_interrupt) (regs, PGM_SPECIFICATION_EXCEPTION);
+            }
 
             OBTAIN_INTLOCK( NULL );
             {
@@ -819,7 +831,7 @@ U32   code;
 
             /* ESA/390 psw should be at address zero */
             /* restore                               */
-            memcpy( regs->psa->iplpsw, saved_iplpsw, sizeof( DBLWRD ) );
+            memcpy( regs->psa->iplpsw, savedpsw.d_psw, sizeof( savedpsw.d_psw ) );
 
             if ( DIAG308_DEBUG )
                 logmsg(">>>> DIAG308_START_KERNEL: start 's390_common_load_finish'\n");
@@ -966,9 +978,10 @@ U32   code;
             /* Validate the IPL parameter block. */
             /* validate structure */
             if (   0 ||
-                   ipb.hdr.version > IPL_MAX_SUPPORTED_VERSION ||
-                   CSWAP32(ipb.hdr.len) > (headsize + bodysize) ||
-                   CSWAP32(ipb.ccw.len) != bodysize
+                   ipb.hdr.version > IPL_MAX_SUPPORTED_VERSION          ||
+                  (CSWAP32( ipb.hdr.len ) & 0x00000007) != 0x00000000   ||       // multiple of 8
+                   CSWAP32( ipb.hdr.len ) > (headsize + bodysize)       ||
+                   CSWAP32( ipb.ccw.len ) != bodysize
                 )
             {
                 WRMSG(HHC01960, "E", subcode, ipb.hdr.version, CSWAP32(ipb.hdr.len), CSWAP32(ipb.ccw.len) );
