@@ -2081,6 +2081,9 @@
     <None Include="tests\pfpo.core">
       <Filter>Other Files\tests\core</Filter>
     </None>
+    <None Include="tests\plo-01-extension.core">
+      <Filter>Other Files\tests\core</Filter>
+    </None>
     <None Include="tests\stfl.core">
       <Filter>Other Files\tests\core</Filter>
     </None>
@@ -2397,6 +2400,9 @@
       <Filter>Other Files\tests\scripts\tst</Filter>
     </None>
     <None Include="tests\pfpo.tst">
+      <Filter>Other Files\tests\scripts\tst</Filter>
+    </None>
+    <None Include="tests\plo-01-extension.tst">
       <Filter>Other Files\tests\scripts\tst</Filter>
     </None>
     <None Include="tests\pr.tst">
@@ -2805,6 +2811,9 @@
       <Filter>Other Files\tests\scripts\asm</Filter>
     </None>
     <None Include="tests\pfpo.asm">
+      <Filter>Other Files\tests\scripts\asm</Filter>
+    </None>
+    <None Include="tests\plo-01-extension.asm">
       <Filter>Other Files\tests\scripts\asm</Filter>
     </None>
     <None Include="tests\TRE-01-basic.asm">
@@ -3240,6 +3249,12 @@
       <Filter>Other Files\tests\scripts\asm\list</Filter>
     </None>
     <None Include="tests\PFPO.pdf">
+      <Filter>Other Files\tests\scripts\asm\list</Filter>
+    </None>
+    <None Include="tests\plo-01-extension.list">
+      <Filter>Other Files\tests\scripts\asm\list</Filter>
+    </None>
+    <None Include="tests\plo-01-extension.pdf">
       <Filter>Other Files\tests\scripts\asm\list</Filter>
     </None>
     <None Include="tests\TRE-01-basic.list">
